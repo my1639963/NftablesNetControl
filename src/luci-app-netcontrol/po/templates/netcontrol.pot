@@ -159,10 +159,10 @@ msgstr ""
 msgid "Evaluated at %s"
 msgstr ""
 
-msgid "Evaluation interval (seconds)"
+msgid "Evaluation loop"
 msgstr ""
 
-msgid "Evaluation loop"
+msgid "Evaluation loop wake-up (seconds)"
 msgstr ""
 
 msgid "Export backup"
@@ -189,10 +189,12 @@ msgstr ""
 msgid "HH:MM, 24 hour clock."
 msgstr ""
 
-msgid "How often the time rule engine re-evaluates device states. Range 60-600, default 60."
+msgid "How often the background loop wakes up. Rule moments are matched to the "
+"minute and cron drives that tick as well, so this only decides how soon "
+"after a minute boundary an event is applied. Range 60-600, default 60."
 msgstr ""
 
-msgid "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-60, default 3."
+msgid "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-30, default 3."
 msgstr ""
 
 msgid "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve."
@@ -235,6 +237,9 @@ msgid "Mon"
 msgstr ""
 
 msgid "Monthly"
+msgstr ""
+
+msgid "Names the device when the inventory has not heard of it yet. A device that already has a label keeps the one from the device list, so rename it there."
 msgstr ""
 
 msgid "next"
@@ -289,15 +294,6 @@ msgid "Reconcile failed"
 msgstr ""
 
 msgid "Reconcile now"
-msgstr ""
-
-msgid "Recreate the kernel rules from the configuration when the router boots."
-msgstr ""
-
-msgid "Restore rules after reboot"
-msgstr ""
-
-msgid "Rule digest"
 msgstr ""
 
 msgid "Rule enabled"
@@ -373,9 +369,6 @@ msgid "The inet netcontrol table or its forward chain is missing. Reconcile to r
 msgstr ""
 
 msgid "The inventory NetControl keeps track of. Listing a device here writes no kernel rule: its traffic stays unrestricted until a time rule governs it."
-msgstr ""
-
-msgid "The label written to the device list. Choosing a known device fills in its hostname; type over it to rename."
 msgstr ""
 
 msgid "The nftables utility is unavailable, so no rule can be enforced."

@@ -60,8 +60,24 @@ function mk(sec, action, start, end, cycle, days, allday) {
 	return r;
 }
 
+/* The replay current_time_target() performs on a manual delete: a single
+ * moment rule owns no interval, so the last event in the scan window is the
+ * only answer. A daily 22:00 block with no end time has to still read as
+ * blocked the next morning - an interval reader used to find nothing here and
+ * hand the device back open. */
+function replay_at(rules, at) {
+	const evs = events_in_range(rules, at - 31 * 86400, at, TZ);
+
+	if (length(evs) === 0)
+		return 'allow (no event in 31 days)';
+
+	const last = evs[length(evs) - 1];
+
+	return sprintf('%s (%s at %s, %d events)', last.target, last.kind, stamp(last.epoch), length(evs));
+}
+
 /* 2026-06-15 is a Monday, so Friday of the same week is the 19th. */
-const base = trim(run(`TZ=${TZ} date -d '2026-06-15 00:00:00' '+%s' 2>/dev/null`).out) * 1;
+const base = trim(run(`${tz_prefix(TZ)}date -d '2026-06-15 00:00:00' '+%s' 2>/dev/null`).out) * 1;
 
 print(sprintf('anchor = %d (%s)\n\n', base, stamp(base)));
 
@@ -99,6 +115,19 @@ dump('T7 invalid windows: 25:00 and start == end',
 dump('T8 events_in_range keeps disabled rules (enabled_timerules filters upstream)',
 	[mk('z', 'block', '08:00', '09:00', 'daily', null, false)],
 	base - 60, base + 86400);
+
+/* The replay current_time_target() performs when a manual row is deleted: the
+ * last event in the scan window decides. A daily 22:00 block with no end time
+ * owns no interval, so an interval based reader used to find nothing here and
+ * hand the device back open. */
+const once = [mk('s', 'block', '22:00', null, 'daily', null, false)];
+
+print('== T9 replay of a single moment rule ==\n');
+
+for (let at in [base + 86400 + 9 * 3600, base + 86400 + 22 * 3600 + 60, base - 3 * 3600])
+	print(sprintf('  %s -> %s\n', stamp(at), replay_at(once, at)));
+
+print('\n');
 
 print('== next event ==\n');
 

@@ -37,6 +37,14 @@ return baseclass.extend({
 		return out;
 	},
 
+	/* A poll failure is transient by nature - rpcd is busy with a tick - so it
+	 * must neither stop the loop nor raise a banner over the table. It still
+	 * must not be invisible: why the rows froze is the one thing a report needs. */
+	logPollError(where, err) {
+		window.console.log('netcontrol: %s poll failed: %s'.format(where,
+			err && err.message ? err.message : err));
+	},
+
 	injectStyles() {
 		if (document.getElementById('netcontrol-uistyle'))
 			return;

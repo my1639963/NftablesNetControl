@@ -154,6 +154,64 @@ const AllDayTimeValue = form.Value.extend({
 	}
 });
 
+/* The preview panel repeats the engine's own vocabulary back to the operator.
+ * One small label function per cell keeps the row builder free of alternatives
+ * it would otherwise have to spell out inline. */
+function sourceLabel(source) {
+	if (source === 'manual')
+		return _('manual');
+
+	if (source === 'timer')
+		return _('time rule');
+
+	return '—';
+}
+
+function actionLabel(action) {
+	if (action === 'block')
+		return _('Block');
+
+	if (action === 'allow')
+		return _('Allow');
+
+	return action;
+}
+
+function windowText(rule) {
+	if (rule.all_day)
+		return _('all day');
+
+	if (rule.end)
+		return '%s–%s'.format(rule.start || '—', rule.end);
+
+	return _('%s, once').format(rule.start || '—');
+}
+
+function nextEventNode(rule) {
+	if (!rule.next) {
+		if (rule.valid)
+			return '';
+
+		return ' (%s)'.format(_('invalid window'));
+	}
+
+	return E('span', { 'class': 'nc-sub' }, ' · %s %s (%s)'.format(_('next'), rule.next.at,
+		rule.next.kind === 'start' ? _('starts') : _('ends')));
+}
+
+function previewRuleNode(rule) {
+	return E('div', {}, [
+		E('span', { 'class': 'nc-dot %s'.format(rule.enabled && rule.valid ? 'on' : 'off') }, '●'),
+		' ',
+		E('code', {}, actionLabel(rule.action)),
+		' ',
+		windowText(rule),
+		' ',
+		rule.name || rule.section,
+		nextEventNode(rule)
+	]);
+}
+
 return view.extend({
 	map: null,
 	section: null,
@@ -218,7 +276,7 @@ return view.extend({
 			o.value(mac, netcontrol.macLabel(mac, hostnames[mac]));
 
 		o = s.option(form.Value, 'device_name', _('Device name'),
-			_('The label written to the device list. Choosing a known device fills in its hostname; type over it to rename.'));
+			_('Names the device when the inventory has not heard of it yet. A device that already has a label keeps the one from the device list, so rename it there.'));
 		o.modalonly = true;
 
 		o = s.option(form.Value, 'name', _('Rule name'));
@@ -287,19 +345,20 @@ return view.extend({
 		});
 	},
 
-	/* UCI never keeps a staged edit on this page. Both write paths a section
-	 * has commit as part of the write itself: the row operations go through the
-	 * map's data model, the modal through its own map, so each one is wrapped.
-	 * The replacements run with `this` bound to the data object and to the
-	 * section, so the view has to be captured in the closure. */
+	/* UCI never keeps a staged edit on this page. Both write paths a section has
+	 * commit as part of the write itself: the row operations go through the map's
+	 * save(), the modal through the section's handleModalSave(). Only these two
+	 * instances are wrapped: map.data is the process wide UCI singleton, so
+	 * patching its save() would make every other LuCI page on the router trigger
+	 * a netcontrol apply as well, and nothing here would undo it. */
 	watchWrites() {
 		const self = this;
-		const data = this.map.data;
-		const origDataSave = L.bind(data.save, data);
+		const origMapSave = L.bind(this.map.save, this.map);
 		const origModalSave = L.bind(this.section.handleModalSave, this.section);
 
-		data.save = function () {
-			return origDataSave.apply(null, arguments).then(L.bind(self.commitAndApply, self));
+		this.map.save = function () {
+			return origMapSave.apply(null, arguments)
+				.then(L.bind(self.commitAndApply, self));
 		};
 
 		this.section.handleModalSave = function (modalMap, ev) {
@@ -376,25 +435,9 @@ return view.extend({
 			return E('tr', { 'class': 'tr cbi-section-table-row' }, [
 				E('td', { 'class': 'td cbi-value-field' }, E('code', {}, d.mac)),
 				E('td', { 'class': 'td cbi-value-field' }, netcontrol.stateSpan(d.blocked)),
-				E('td', { 'class': 'td cbi-value-field' }, d.source === 'manual' ? _('manual') : (d.source === 'timer' ? _('time rule') : '—')),
+				E('td', { 'class': 'td cbi-value-field' }, sourceLabel(d.source)),
 				E('td', { 'class': 'td cbi-value-field' }, d.at || '—'),
-				E('td', { 'class': 'td cbi-value-field' }, (d.rules || []).map(function (r) {
-					const window = r.all_day ? _('all day')
-						: (r.end ? '%s–%s'.format(r.start || '—', r.end) : _('%s, once').format(r.start || '—'));
-
-					return E('div', {}, [
-						E('span', { 'class': 'nc-dot %s'.format(r.enabled && r.valid ? 'on' : 'off') }, '●'),
-						' ',
-						E('code', {}, r.action === 'block' ? _('Block') : (r.action === 'allow' ? _('Allow') : r.action)),
-						' ',
-						window,
-						' ',
-						r.name || r.section,
-						r.next
-							? E('span', { 'class': 'nc-sub' }, ' · %s %s (%s)'.format(_('next'), r.next.at, r.next.kind === 'start' ? _('starts') : _('ends')))
-							: (r.valid ? '' : ' (%s)'.format(_('invalid window')))
-					]);
-				}))
+				E('td', { 'class': 'td cbi-value-field' }, (d.rules || []).map(previewRuleNode))
 			]);
 		});
 

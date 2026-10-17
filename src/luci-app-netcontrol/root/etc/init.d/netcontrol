@@ -22,7 +22,7 @@ stop() {
     # fail-close: rules and cron entries survive on purpose. Deleting them here
     # would silently reopen internet access for every blocked device until the
     # next boot.
-    logger -t netcontrol "service stopped, evaluation loop killed (fail-close)"
+    logger -t netcontrol -p daemon.notice "service stopped, evaluation loop killed (fail-close)"
 }
 
 reload() {

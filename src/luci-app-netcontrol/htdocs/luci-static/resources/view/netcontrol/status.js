@@ -78,19 +78,24 @@ return view.extend({
 			toolbar.appendChild(E('div', { 'class': 'cbi-section-descr' },
 				_('The conntrack utility is not installed, so flows of a newly blocked device expire on their own instead of being torn down.')));
 
-		const node = E('div', { 'class': 'cbi-section' }, [toolbar]);
+		/* The body is built in this pass, not in a macrotask: the page must show
+		 * its content even when the framework has not inserted the node yet, and
+		 * only the poll registration below actually needs a connected node. */
+		const node = E('div', { 'class': 'cbi-section' }, [
+			toolbar,
+			E('div', {}, this.buildNodes(this.state))
+		]);
+
+		this.rootNode = node;
 
 		/* Poll.add() fires an immediate tick, which would run before the
 		 * framework inserts this node into the DOM. Defer to a macrotask. */
 		window.setTimeout(function () {
-			self.rootNode = node;
-
 			if (!node.isConnected)
 				return;
 
 			self.boundPollFn = L.bind(self.pollStatus, self);
 			poll.add(self.boundPollFn, POLL_INTERVAL);
-			node.appendChild(E('div', {}, self.buildNodes(self.state)));
 		}, 0);
 
 		return node;
@@ -121,7 +126,9 @@ return view.extend({
 
 			if (body)
 				dom.content(body, this.buildNodes(this.state));
-		}, this)).catch(function () { });
+		}, this)).catch(function (err) {
+			netcontrol.logPollError('status', err);
+		});
 	},
 
 	handleReconcile(ev) {
@@ -155,6 +162,16 @@ return view.extend({
 
 	badge(text, kind) {
 		return E('span', { 'class': 'nc-badge nc-%s'.format(kind) }, text);
+	},
+
+	levelLabel(kind) {
+		if (kind === 'error')
+			return _('ERROR');
+
+		if (kind === 'warn')
+			return _('WARN');
+
+		return _('INFO');
 	},
 
 	/* Everything the operator has to act on, in severity order. */
@@ -191,10 +208,8 @@ return view.extend({
 
 		if (issues.length) {
 			nodes.push(E('div', { 'class': 'nc-issues' }, issues.map(function (i) {
-				const label = i[0] === 'error' ? _('ERROR') : (i[0] === 'warn' ? _('WARN') : _('INFO'));
-
 				return E('div', { 'class': 'nc-issue nc-issue-%s'.format(i[0]) }, [
-					this.badge(label, i[0]), ' ', i[1]
+					this.badge(this.levelLabel(i[0]), i[0]), ' ', i[1]
 				]);
 			}, this)));
 		}
@@ -216,8 +231,7 @@ return view.extend({
 			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Local time (%s)').format(st.timezone)), E('td', { 'class': 'td' }, st.local_time || '—')]),
 			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('UTC time')), E('td', { 'class': 'td' }, st.utc_time || '—')]),
 			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Time rules')), E('td', { 'class': 'td' }, '%d'.format(st.timerule_count))]),
-			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Device states held')), E('td', { 'class': 'td' }, '%d'.format(st.state_count))]),
-			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Rule digest')), E('td', { 'class': 'td' }, E('code', {}, st.expected_hash || '—'))])
+			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Device states held')), E('td', { 'class': 'td' }, '%d'.format(st.state_count))])
 		]));
 
 		nodes.push(E('h3', {}, _('Device states')));

@@ -37,11 +37,16 @@ define Package/$(PKG_NAME)/postinst
 exit 0
 endef
 
-# fail-close: prerm stops the eval loop only, nftables rules are left in place
+# fail-close: prerm stops the eval loop and removes its crontab lines, nftables
+# rules are left in place
 define Package/$(PKG_NAME)/prerm
 [ -n "$${IPKG_INSTROOT}" ] || {
 	/etc/init.d/netcontrol stop
 	/etc/init.d/netcontrol disable
+	# The ubus object goes away with the package; a crontab line that calls it
+	# would keep failing every minute for as long as the router runs.
+	sed -i '/# netcontrol:/d' /etc/crontabs/root 2>/dev/null
+	/etc/init.d/cron reload 2>/dev/null
 }
 exit 0
 endef

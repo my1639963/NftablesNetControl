@@ -9,6 +9,7 @@
 'require netcontrol';
 
 const POLL_INTERVAL = 10;
+const CFG = 'netcontrol';
 
 const callDevices = rpc.declare({
 	object: 'luci.netcontrol',
@@ -38,7 +39,7 @@ return view.extend({
 	load() {
 		return Promise.all([
 			L.resolveDefault(callDevices(), []),
-			uci.load('netcontrol')
+			uci.load(CFG)
 		]);
 	},
 
@@ -49,7 +50,7 @@ return view.extend({
 
 		this.injectStyles();
 
-		m = new form.Map('netcontrol', _('Device Control'),
+		m = new form.Map(CFG, _('Device Control'),
 			_('The inventory NetControl keeps track of. Listing a device here writes no kernel rule: its traffic stays unrestricted until a time rule governs it.'));
 
 		s = m.section(form.NamedSection, 'global', 'netcontrol', _('Global settings'),
@@ -74,22 +75,17 @@ return view.extend({
 				: _('Invalid timezone format. Use an IANA name such as Asia/Shanghai.');
 		};
 
-		o = s.option(form.Value, 'eval_interval', _('Evaluation interval (seconds)'),
-			_('How often the time rule engine re-evaluates device states. Range 60-600, default 60.'));
+		o = s.option(form.Value, 'eval_interval', _('Evaluation loop wake-up (seconds)'),
+			_('How often the background loop wakes up. Rule moments are matched to the minute and cron drives that tick as well, so this only decides how soon after a minute boundary an event is applied. Range 60-600, default 60.'));
 		o.datatype = 'range(60,600)';
 		o.default = '60';
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'watchdog_interval', _('Watchdog interval (minutes)'),
-			_('How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-60, default 3.'));
-		o.datatype = 'range(1,60)';
+			_('How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-30, default 3.'));
+		o.datatype = 'range(1,30)';
 		o.default = '3';
 		o.rmempty = false;
-
-		o = s.option(form.Flag, 'auto_restore', _('Restore rules after reboot'),
-			_('Recreate the kernel rules from the configuration when the router boots.'));
-		o.rmempty = false;
-		o.default = o.enabled;
 
 		s = m.section(form.GridSection, 'device', _('Device list'),
 			_('The devices NetControl keeps track of. A row here is a registration only: it writes no nftables rule, so the device keeps unrestricted access until a time rule governs it.'));
@@ -98,7 +94,7 @@ return view.extend({
 		s.addremove = true;
 		s.nodescriptions = true;
 		s.modaltitle = L.bind(function(section_id) {
-			const name = uci.get('netcontrol', section_id, 'name');
+			const name = uci.get(CFG, section_id, 'name');
 			return _('Edit device') + (name ? ': %s'.format(name) : '');
 		}, this);
 		netcontrol.styleModalFooter(s);
@@ -112,7 +108,7 @@ return view.extend({
 				return true;
 
 			const mac = value.toLowerCase();
-			const dup = uci.sections('netcontrol', 'device').some(function(sec) {
+			const dup = uci.sections(CFG, 'device').some(function(sec) {
 				return sec['.name'] != section_id && (sec.mac || '').toLowerCase() == mac;
 			});
 
@@ -122,7 +118,7 @@ return view.extend({
 		o = s.option(form.Value, 'name', _('Device name'), _('Optional, used for display only.'));
 		o.rmempty = true;
 		o.textvalue = function(section_id) {
-			return uci.get('netcontrol', section_id, 'name') || '—';
+			return uci.get(CFG, section_id, 'name') || '—';
 		};
 
 		o = s.option(form.Value, 'ip', _('IP'), _('Optional reference; the live address comes from the leases.'));
@@ -130,7 +126,7 @@ return view.extend({
 		o.datatype = 'ipaddr';
 		o.placeholder = '192.168.1.20';
 		o.textvalue = function(section_id) {
-			return uci.get('netcontrol', section_id, 'ip') || '—';
+			return uci.get(CFG, section_id, 'ip') || '—';
 		};
 
 		this.map = m;
@@ -161,7 +157,7 @@ return view.extend({
 	isEnrolled(mac) {
 		const needle = mac.toLowerCase();
 
-		return uci.sections('netcontrol', 'device').some(function(sec) {
+		return uci.sections(CFG, 'device').some(function(sec) {
 			return (sec.mac || '').toLowerCase() == needle;
 		});
 	},
@@ -223,14 +219,16 @@ return view.extend({
 			return Promise.resolve();
 		}
 
-		return callDevices().then(function(res) {
+		return callDevices().then(L.bind(function(res) {
 			const tbody = document.querySelector('#nc-discovered tbody');
 
 			if (!tbody)
 				return;
 
 			dom.content(tbody, L.toArray(res).map(L.bind(this.buildDeviceRow, this)));
-		}.bind(this)).catch(function() { });
+		}, this)).catch(L.bind(function(err) {
+			netcontrol.logPollError('devices', err);
+		}, this));
 	},
 
 	/* ---- enrolment ---- */
@@ -242,19 +240,19 @@ return view.extend({
 		if (this.isEnrolled(mac))
 			return Promise.resolve();
 
-		const sid = uci.add('netcontrol', 'device');
+		const sid = uci.add(CFG, 'device');
 
-		uci.set('netcontrol', sid, 'mac', mac);
+		uci.set(CFG, sid, 'mac', mac);
 
 		if (name)
-			uci.set('netcontrol', sid, 'name', name);
+			uci.set(CFG, sid, 'name', name);
 
 		if (ip)
-			uci.set('netcontrol', sid, 'ip', ip);
+			uci.set(CFG, sid, 'ip', ip);
 
 		return uci.save()
 			.then(function() {
-				return callCommit('netcontrol');
+				return callCommit(CFG);
 			})
 			.then(L.bind(function() {
 				return Promise.all([ this.map.render(), this.pollDiscovered() ]);
@@ -270,7 +268,7 @@ return view.extend({
 	/* Map.save() only stages the deltas under /tmp/.uci, so commit explicitly
 	 * before the backend reloads the configuration through its own cursor. */
 	commitAndApply() {
-		return callCommit('netcontrol')
+		return callCommit(CFG)
 			.then(function() {
 				return callApply();
 			})
@@ -282,7 +280,7 @@ return view.extend({
 						_('Applying the rules failed: %s').format(res.error || _('nftables rejected the rule set.'))), 'error');
 
 				/* The backend may rewrite flags, so drop the cached config. */
-				uci.unload('netcontrol');
+				uci.unload(CFG);
 
 				return this.map.render();
 			}, this));

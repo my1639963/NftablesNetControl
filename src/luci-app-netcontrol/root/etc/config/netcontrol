@@ -22,10 +22,8 @@
 
 config netcontrol 'global'
 	option enabled '1'
-	option auto_restore '1'
 	option watchdog_interval '3'
 	option eval_interval '60'
-	# 时区配置（SRS §6.3，默认 Asia/Shanghai，需要 zoneinfo-asia）
+	# 时区配置（默认 Asia/Shanghai，需要 zoneinfo-asia）
 	option timezone 'Asia/Shanghai'
 	# option offload_detected '0'
-	# option expected_hash ''

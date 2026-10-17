@@ -15,18 +15,9 @@ set_default() {
 }
 
 set_default enabled 1
-set_default auto_restore 1
 set_default watchdog_interval 3
 set_default eval_interval 60
 set_default timezone Asia/Shanghai
-
-# Recorded once here so the status view does not have to probe the filesystem
-# on every poll; watchdog refreshes the same flag.
-if [ -e "/usr/share/zoneinfo/$(uci -q get $GLOBAL.timezone)" ]; then
-	uci -q set $GLOBAL.tz_valid=1
-else
-	uci -q set $GLOBAL.tz_valid=0
-fi
 
 uci -q commit netcontrol
 

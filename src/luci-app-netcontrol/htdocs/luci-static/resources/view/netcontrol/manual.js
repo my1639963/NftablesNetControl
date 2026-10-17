@@ -199,7 +199,9 @@ return view.extend({
 				dom.content(tbody, this.buildRows());
 
 			this.refreshMeta();
-		}, this)).catch(function () { });
+		}, this)).catch(function (err) {
+			netcontrol.logPollError('manual', err);
+		});
 	},
 
 	refreshMeta() {

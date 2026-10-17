@@ -160,11 +160,11 @@ msgstr "错误"
 msgid "Evaluated at %s"
 msgstr "评估时间：%s"
 
-msgid "Evaluation interval (seconds)"
-msgstr "评估间隔（秒）"
-
 msgid "Evaluation loop"
 msgstr "评估循环"
+
+msgid "Evaluation loop wake-up (seconds)"
+msgstr "评估循环唤醒周期（秒）"
 
 msgid "Export backup"
 msgstr "导出备份"
@@ -190,11 +190,13 @@ msgstr "硬件流量卸载已启用：设备被阻断后，已建立的连接可
 msgid "HH:MM, 24 hour clock."
 msgstr "HH:MM，24 小时制。"
 
-msgid "How often the time rule engine re-evaluates device states. Range 60-600, default 60."
-msgstr "时间规则引擎重新评估设备状态的频率。范围 60-600，默认 60。"
+msgid "How often the background loop wakes up. Rule moments are matched to the "
+"minute and cron drives that tick as well, so this only decides how soon "
+"after a minute boundary an event is applied. Range 60-600, default 60."
+msgstr "后台循环多久唤醒一次。规则时刻按分钟对齐，cron 也按同一节奏触发，所以这里只决定事件在整分后多久被应用。范围 60-600，默认 60。"
 
-msgid "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-60, default 3."
-msgstr "看门狗比对内核规则与预期集合并修复漂移的频率。范围 1-60，默认 3。"
+msgid "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-30, default 3."
+msgstr "看门狗比对内核规则与应有集合并修复偏差的频率。范围 1-30，默认 3。"
 
 msgid "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve."
 msgstr "评估所有时间规则使用的 IANA 时区名称，例如 Asia/Shanghai。需安装 zoneinfo-asia 软件包才能解析。"
@@ -237,6 +239,9 @@ msgstr "周一"
 
 msgid "Monthly"
 msgstr "每月"
+
+msgid "Names the device when the inventory has not heard of it yet. A device that already has a label keeps the one from the device list, so rename it there."
+msgstr "设备清单还不认识这台设备时，由这里为它命名。已经有标签的设备会保留设备清单里的名字，要改名请到设备清单里修改。"
 
 msgid "next"
 msgstr "下次"
@@ -291,15 +296,6 @@ msgstr "核对失败"
 
 msgid "Reconcile now"
 msgstr "立即核对"
-
-msgid "Recreate the kernel rules from the configuration when the router boots."
-msgstr "路由器启动时依据配置重建内核规则。"
-
-msgid "Restore rules after reboot"
-msgstr "重启后恢复规则"
-
-msgid "Rule digest"
-msgstr "规则摘要"
 
 msgid "Rule enabled"
 msgstr "规则已启用"
@@ -375,9 +371,6 @@ msgstr "inet netcontrol 表或其 forward 链缺失。请点击“立即核对�
 
 msgid "The inventory NetControl keeps track of. Listing a device here writes no kernel rule: its traffic stays unrestricted until a time rule governs it."
 msgstr "NetControl 维护的设备清单。把设备列入清单不会写入任何内核规则：在被时间规则纳管之前，其流量始终不受限。"
-
-msgid "The label written to the device list. Choosing a known device fills in its hostname; type over it to rename."
-msgstr "写入设备清单的标签。从下拉里选中已知设备时会自动填入它的主机名；直接改写即可重命名。"
 
 msgid "The nftables utility is unavailable, so no rule can be enforced."
 msgstr "nftables 工具不可用，无法执行任何规则。"
