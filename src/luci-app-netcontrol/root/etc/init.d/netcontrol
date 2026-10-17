@@ -1,0 +1,30 @@
+#!/bin/sh /etc/rc.common
+# /etc/init.d/netcontrol
+#
+# Thin rc.common wrapper: every action is a ubus call on the luci.netcontrol
+# rpcd plugin, so the shell layer holds no rule logic and no nft invocations.
+# rpcd starts at S12 and this script at S99, so the object is always registered
+# before boot() is reached.
+
+START=99
+STOP=10
+
+UBUS=/bin/ubus
+OBJECT=luci.netcontrol
+
+start() {
+    $UBUS call $OBJECT boot >/dev/null
+}
+
+stop() {
+    $UBUS call $OBJECT stopDaemon >/dev/null
+
+    # fail-close: rules and cron entries survive on purpose. Deleting them here
+    # would silently reopen internet access for every blocked device until the
+    # next boot.
+    logger -t netcontrol "service stopped, evaluation loop killed (fail-close)"
+}
+
+reload() {
+    start
+}

@@ -1,0 +1,15 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const { parse_po } = require('./po2lmo.cjs');
+const pkg = path.join(__dirname, 'luci-app-netcontrol');
+const ids = new Set(parse_po(fs.readFileSync(path.join(pkg, 'po/templates/netcontrol.pot'), 'utf8')).map(e => e[0]).filter(s => s !== ''));
+const p = path.join(__dirname, 'translations-zh.json');
+const add = JSON.parse(process.env.TRANS_ADD || '{}');
+const cur = Object.assign({}, JSON.parse(fs.readFileSync(p, 'utf8')), add);
+const dropped = Object.keys(cur).filter(k => !ids.has(k));
+const kept = Object.fromEntries(Object.entries(cur).filter(([k]) => ids.has(k)));
+const out = Object.keys(kept).sort().map(k => ' ' + JSON.stringify(k) + ': ' + JSON.stringify(kept[k]));
+fs.writeFileSync(p, '{\n' + out.join(',\n') + '\n}\n');
+console.log('kept:', out.length, 'dropped:', dropped.length);
+console.log(dropped.join('\n'));

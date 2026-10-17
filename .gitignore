@@ -55,3 +55,14 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# --- luci-app-netcontrol (LuCI/ucode side of this repo) ---
+# Local scratch: pulled framework sources, staging copies, deploy logs.
+tmp/
+# Router snapshots: live UCI state, installed upstream JS, screenshots.
+router-backup/
+# Qoder / editor state.
+.qoder/
+.workbuddy/
+# Compiled translation catalogue is produced by src/po2lmo.cjs.
+*.lmo

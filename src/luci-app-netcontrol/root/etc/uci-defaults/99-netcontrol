@@ -1,0 +1,36 @@
+#!/bin/sh
+# /etc/uci-defaults/99-netcontrol
+#
+# Runs once on the first boot after an install, or after a sysupgrade that kept
+# an older configuration. It only backfills options the views assume exist and
+# registers the init script; rule enforcement stays entirely in the
+# luci.netcontrol ubus object.
+
+GLOBAL=netcontrol.global
+
+uci -q show $GLOBAL >/dev/null 2>&1 || uci -q set $GLOBAL=netcontrol
+
+set_default() {
+	uci -q get $GLOBAL.$1 >/dev/null 2>&1 || uci -q set $GLOBAL.$1="$2"
+}
+
+set_default enabled 1
+set_default auto_restore 1
+set_default watchdog_interval 3
+set_default eval_interval 60
+set_default timezone Asia/Shanghai
+
+# Recorded once here so the status view does not have to probe the filesystem
+# on every poll; watchdog refreshes the same flag.
+if [ -e "/usr/share/zoneinfo/$(uci -q get $GLOBAL.timezone)" ]; then
+	uci -q set $GLOBAL.tz_valid=1
+else
+	uci -q set $GLOBAL.tz_valid=0
+fi
+
+uci -q commit netcontrol
+
+/etc/init.d/netcontrol enable
+/etc/init.d/netcontrol start
+
+exit 0

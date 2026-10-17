@@ -1,0 +1,1803 @@
+#!/usr/bin/ucode
+// luci.netcontrol - rpcd ucode backend
+//
+// Every kernel-side mutation (nftables) and every generated artifact (cron)
+// funnels through this single object. rpcd serialises ubus calls, which is
+// what keeps the boot handler, cron, hotplug and the LuCI UI from racing each
+// other - the legacy flock wrapper is gone with it.
+//
+// UCI itself is edited by the LuCI views through form.Map; this object only
+// creates the sections behind the quick-action buttons and then converges the
+// kernel onto whatever UCI says (apply).
+//
+// Manual control (manualSet / manualDelete) is a state machine event like any
+// other: it writes a persistent row for the table, then pushes the device into
+// the requested state right away through the same entry point the clock uses.
+// It never edits, pauses or cancels a time rule, so its effect lasts until the
+// next event of that device - which is why deleting the row is itself an event:
+// it hands the device back to whatever the time layer currently says.
+//
+// Time rules are two moments, nothing more. A rule's start applies its own
+// target and its end applies the opposite; the engine never compares one
+// rule's window against another's, so overlapping windows flip the state back
+// and forth and the operator owns that. Every applied event is logged even when
+// the state did not change - an executed event is not the same as a flip.
+//
+// The resulting per device state lives in config timerstate and the kernel
+// chain is converged onto it. Every mutation in this object ends in a UCI
+// commit inside the same call, so the UI can never show unsaved changes.
+
+'use strict';
+
+import { access, popen, readfile, writefile } from 'fs';
+import { cursor } from 'uci';
+import { init_action } from 'luci.sys';
+
+const CFG = 'netcontrol';
+const TABLE = 'inet netcontrol';
+const CHAIN = 'nc_forward';
+const NFT_BIN = '/usr/sbin/nft';
+const CT_BIN = '/usr/sbin/conntrack';
+const CRON_FILE = '/etc/crontabs/root';
+const CRON_TAG = '# netcontrol:';
+const DAEMON_PID = '/tmp/run/netcontrol_eval.pid';
+const DAEMON_TICK = '/tmp/run/netcontrol_eval.tick';
+const TICK_FILE = '/tmp/run/netcontrol.last_tick';
+const LEASES = '/tmp/dhcp.leases';
+const ARP = '/proc/net/arp';
+const CLOCK_BASELINE = 1735689600;
+
+const MIN_EVAL_INTERVAL = 60;
+const MAX_EVAL_INTERVAL = 600;
+const DEFAULT_EVAL_INTERVAL = 60;
+const MIN_WATCHDOG_INTERVAL = 1;
+const MAX_WATCHDOG_INTERVAL = 60;
+const DEFAULT_WATCHDOG_INTERVAL = 3;
+
+/* A dead loop must not replay more than a day of events when it comes back. */
+const MAX_TICK_MINUTES = 1440;
+
+/* How far the preview looks for a rule's next event. A monthly rule on day 31
+ * can be 59 days out (February to March), so the frame is walked a month
+ * longer than that; one `date` probe per day makes the horizon cheap. */
+const NEXT_EVENT_DAYS = 70;
+
+const uci = cursor();
+
+/* ── primitives ───────────────────────────────────────── */
+
+/* ucode's join() takes the separator first; wrap it so call sites read naturally. */
+function is_set(v) {
+	return (v ?? null) !== null;
+}
+
+/* fs.access() yields null on any error, so normalise it for JSON responses. */
+function has(path, mode) {
+	return is_set(access(path, mode));
+}
+
+function strjoin(items, sep) {
+	if (!is_set(items))
+		return '';
+
+	return join(sep ?? '', items);
+}
+
+/* This ucode build has no some()/every(). */
+function any(items, test) {
+	for (let v in items)
+		if (test(v))
+			return true;
+
+	return false;
+}
+
+function first(list, test) {
+	for (let it in list)
+		if (test(it))
+			return it;
+
+	return null;
+}
+
+function to_int(value, fallback) {
+	if (!is_set(value))
+		return fallback;
+
+	const m = match(`${value}`, /^-?[0-9]+$/);
+
+	return m ? m[0] * 1 : fallback;
+}
+
+function clamp_int(value, fallback, low, high) {
+	let n = to_int(value, fallback);
+
+	n = n | 0;
+
+	return n < low ? low : (n > high ? high : n);
+}
+
+function shellquote(value) {
+	const s = is_set(value) ? `${value}` : '';
+
+	return `'${replace(s, "'", `'\\''`)}'`;
+}
+
+function run(cmd) {
+	const fd = popen(cmd, 'r');
+
+	if (!fd)
+		return { out: '', rc: 1 };
+
+	const out = fd.read('all') ?? '';
+	const rc = fd.close();
+
+	return { out, rc: rc ?? 1 };
+}
+
+function log(priority, message) {
+	run(`logger -t netcontrol -p daemon.${priority} ${shellquote(message)}`);
+}
+
+function is_bool(value, fallback) {
+	if (!is_set(value))
+		return fallback;
+
+	return `${value}` !== '0' && `${value}` !== 'false';
+}
+
+/* MACs are canonical lower-case everywhere: UCI, nftables and the UI all
+ * compare the same representation. */
+function norm_mac(value) {
+	const hex = replace(lc(`${value ?? ''}`), /[^0-9a-f]/g, '');
+
+	if (match(hex, /^[0-9a-f]{12}$/) === null)
+		return null;
+
+	return strjoin([
+		substr(hex, 0, 2), substr(hex, 2, 2), substr(hex, 4, 2),
+		substr(hex, 6, 2), substr(hex, 8, 2), substr(hex, 10, 2)
+	], ':');
+}
+
+function is_ipv4(value) {
+	const m = match(`${value ?? ''}`, /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$/);
+
+	if (!m)
+		return false;
+
+	for (let i = 1; i <= 4; i++)
+		if (m[i] * 1 > 255)
+			return false;
+
+	return true;
+}
+
+function is_timezone(value) {
+	return match(`${value ?? ''}`, /^[A-Za-z0-9_+\/-]+$/) !== null &&
+		has(`/usr/share/zoneinfo/${value}`, "r");
+}
+
+function is_section_id(value) {
+	return match(`${value ?? ''}`, /^[A-Za-z0-9_-]+$/) !== null;
+}
+
+/* ── uci ──────────────────────────────────────────────── */
+
+function load_cfg() {
+	uci.load(CFG);
+}
+
+function get_global(option, fallback) {
+	const v = uci.get(CFG, 'global', option);
+
+	return is_set(v) && v !== '' ? `${v}` : fallback;
+}
+
+/* null means "fall back to the system local timezone": OpenWrt stores a POSIX
+ * zone string in /etc/TZ and the zoneinfo tree is an optional package, so an
+ * unresolved IANA name must not silently evaluate rules in UTC. */
+function timezone() {
+	const tz = get_global('timezone', 'Asia/Shanghai');
+
+	return is_timezone(tz) ? tz : null;
+}
+
+function global_enabled() {
+	return get_global('enabled', '1') !== '0';
+}
+
+function sections(type) {
+	const out = [];
+
+	uci.foreach(CFG, type, function (s) {
+		push(out, s);
+	});
+
+	return out;
+}
+
+function set_option(section, option, value) {
+	uci.set(CFG, section, option, value);
+}
+
+function persist() {
+	if (!uci.commit(CFG)) {
+		log('err', 'UCI commit failed');
+		return false;
+	}
+
+	return true;
+}
+
+/* ── time ─────────────────────────────────────────────── */
+
+function tz_prefix(tz) {
+	return tz === null ? '' : `TZ=${shellquote(tz)} `;
+}
+
+function local_parts(tz, epoch) {
+	const res = run(`${tz_prefix(tz)}date -d @${epoch} '+%u %d %H %M %S' 2>/dev/null`);
+	const m = match(trim(res.out), /^([0-9]) ([0-9]{2}) ([0-9]{2}) ([0-9]{2}) ([0-9]{2})$/);
+
+	if (!m)
+		return null;
+
+	return {
+		dow: m[1] * 1,
+		day: m[2] * 1,
+		hour: m[3] * 1,
+		min: m[4] * 1,
+		sec: m[5] * 1,
+		total: m[3] * 1 * 60 + m[4] * 1
+	};
+}
+
+function utc_parts(epoch) {
+	return local_parts('UTC', epoch);
+}
+
+function iso_now(tz) {
+	return trim(run(`${tz_prefix(tz)}date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null`).out);
+}
+
+function clock_ok() {
+	return time() >= CLOCK_BASELINE;
+}
+
+function clock_context() {
+	const tz = timezone();
+	const epoch = time();
+	let now = local_parts(tz, epoch);
+	let prev = now === null ? null : local_parts(tz, epoch - 86400);
+
+	if (!clock_ok() || now === null || prev === null) {
+		now = utc_parts(epoch);
+		prev = utc_parts(epoch - 86400);
+	}
+
+	return { tz, epoch, now, prev };
+}
+
+/* ── nftables ─────────────────────────────────────────── */
+
+function nft_available() {
+	return has(NFT_BIN, "x");
+}
+
+function table_exists() {
+	return run(`${NFT_BIN} list table ${TABLE} >/dev/null 2>&1`).rc === 0;
+}
+
+function chain_exists() {
+	return run(`${NFT_BIN} list chain ${TABLE} ${CHAIN} >/dev/null 2>&1`).rc === 0;
+}
+
+function ensure_base() {
+	if (!nft_available()) {
+		log('err', 'nftables binary missing');
+		return false;
+	}
+
+	if (!table_exists() && run(`${NFT_BIN} add table ${TABLE}`).rc !== 0) {
+		log('err', 'failed to create table inet netcontrol');
+		return false;
+	}
+
+	if (!chain_exists() &&
+			run(`${NFT_BIN} add chain ${TABLE} ${CHAIN} '{ type filter hook forward priority -10; policy accept; }'`).rc !== 0) {
+		log('err', 'failed to create chain nc_forward');
+		return false;
+	}
+
+	return true;
+}
+
+function chain_rules() {
+	const out = run(`${NFT_BIN} -a list chain ${TABLE} ${CHAIN} 2>/dev/null`).out;
+	const rules = [];
+
+	/* Anchored to rule bodies: the chain header also carries a handle and
+	 * must never be collected for deletion. */
+	/* ucode's regex engine has no (?:...) groups, so the MAC is spelled out. */
+	for (let line in split(out, '\n')) {
+		const m = match(line, /^[ \t]*ether (saddr|daddr) ([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}) drop[ \t].*# handle ([0-9]+)\b/);
+
+		if (m)
+			push(rules, { dir: m[1], mac: m[2], handle: m[3] * 1 });
+	}
+
+	return rules;
+}
+
+function kernel_macs() {
+	const set = {};
+
+	for (let r in chain_rules())
+		set[r.mac] = true;
+
+	return sort(keys(set));
+}
+
+/* nft -f commits the whole script as one transaction, which removes the
+ * allow-window a flush-then-add sequence would leave open and makes a failed
+ * batch a no-op instead of a half-applied policy. */
+function nft_apply(lines) {
+	const script = strjoin(lines, '\n');
+
+	return run(`printf '%s' ${shellquote(script)} | ${NFT_BIN} -f -`).rc === 0;
+}
+
+function batch_lines(blocks) {
+	const lines = [`flush chain ${TABLE} ${CHAIN}`];
+
+	for (let b in blocks) {
+		const comment = `netcontrol:device:${b.section}:${b.rule_type}`;
+
+		push(lines, `add rule ${TABLE} ${CHAIN} ether saddr ${b.mac} drop comment "${comment}"`);
+		push(lines, `add rule ${TABLE} ${CHAIN} ether daddr ${b.mac} drop comment "${comment}"`);
+	}
+
+	return lines;
+}
+
+/* ── engine ───────────────────────────────────────────── */
+
+function group_by(items, key) {
+	const out = {};
+
+	for (let it in items) {
+		const mac = norm_mac(it[key]);
+
+		if (mac === null)
+			continue;
+
+		if (!is_set(out[mac]))
+			out[mac] = [];
+
+		push(out[mac], it);
+	}
+
+	return out;
+}
+
+function merge(a, b) {
+	const out = {};
+
+	for (let k in keys(a))
+		out[k] = a[k];
+
+	for (let k in keys(b))
+		out[k] = b[k];
+
+	return out;
+}
+
+function contains_value(list, needle) {
+	if (!is_set(list))
+		return false;
+
+	if (type(list) !== 'array')
+		list = [list];
+
+	for (let v in list)
+		if (to_int(v, null) === needle)
+			return true;
+
+	return false;
+}
+
+function cycle_matches(rule, now) {
+	switch (rule.cycle_type ?? 'daily') {
+		case 'weekly':
+			return contains_value(rule.day_values, now.dow);
+
+		case 'monthly':
+			return contains_value(rule.day_values, now.day);
+	}
+
+	return true;
+}
+
+/* A cross-midnight window attributes the after-midnight slice to the day the
+ * window started on, so Friday 20:00-06:00 still covers Saturday 02:00. */
+/* Minutes since midnight, or null. Hand-edited UCI can hold 25:00, which a
+ * plain regex would accept and the cross-midnight branch would then treat as
+ * a real window. */
+function hhmm_total(value) {
+	const m = match(`${value ?? ''}`, /^([0-9]{1,2}):([0-9]{2})$/);
+
+	if (!m || m[1] * 1 > 23 || m[2] * 1 > 59)
+		return null;
+
+	/* * 1 on every capture: ucode's + concatenates strings, so "120" + "00"
+	 * would otherwise be "12000" instead of 150. */
+	return m[1] * 60 + m[2] * 1;
+}
+
+function rule_matches(rule, now, prev) {
+	/* An absent all_day means "not all day", matching the legacy evaluator and
+	 * the Flag's rmempty behaviour: an unchecked flag is removed from UCI, so
+	 * defaulting to true here would turn every time window into a 24h block. */
+	if (is_bool(rule.all_day, false))
+		return { matched: true, cycle: cycle_matches(rule, now), start: null, end: null };
+
+	const start = hhmm_total(rule.time_start);
+	const end = hhmm_total(rule.time_end);
+
+	/* Only the interval questions this helper, and a lone moment owns no
+	 * interval: a rule without an end time never covers "now", it just runs. */
+	if (start === null || end === null)
+		return { matched: false, cycle: false, start: null, end: null };
+
+	if (start === end)
+		return { matched: false, cycle: false, start, end };
+
+	if (start < end)
+		return {
+			matched: now.total >= start && now.total < end,
+			cycle: cycle_matches(rule, now),
+			start, end
+		};
+
+	if (now.total >= start)
+		return { matched: true, cycle: cycle_matches(rule, now), start, end };
+
+	if (now.total < end)
+		return { matched: true, cycle: cycle_matches(rule, prev), start, end };
+
+	return { matched: false, cycle: false, start, end };
+}
+
+function rule_target(rule) {
+	return (rule.action ?? 'block') === 'allow' ? 'allow' : 'block';
+}
+
+function flip(target) {
+	return target === 'allow' ? 'block' : 'allow';
+}
+
+/* The moments a rule owns. The start moment is required and runs the rule's own
+ * action; the end moment is optional and runs the opposite one, so "block this
+ * device every day at 10:00" is a complete rule rather than a half filled
+ * window. A cross-midnight window - and the whole day flag, which is 00:00 to
+ * the next 00:00 - places its end on the following day, so the cycle check for
+ * that end keeps using the day the window started on. A window whose ends match
+ * its start has no moments to run and yields nothing. */
+function rule_window(rule) {
+	if (is_bool(rule.all_day, false))
+		return { valid: true, start: 0, end: 0, cross: true };
+
+	const start = hhmm_total(rule.time_start);
+	const end = hhmm_total(rule.time_end);
+
+	if (start === null || start === end)
+		return { valid: false, start: null, end: null, cross: false };
+
+	return { valid: true, start, end, cross: end !== null && end < start };
+}
+
+function enabled_timerules() {
+	const out = [];
+
+	for (let r in sections('timerule')) {
+		if (!is_bool(r.enabled, true) || norm_mac(r.device_mac) === null)
+			continue;
+
+		push(out, r);
+	}
+
+	return out;
+}
+
+/* Where the clock would leave this device right now. Only manual_delete()
+ * calls it, exactly once, to hand the device back after withdrawing a manual
+ * row: the running engine never asks what a window means. */
+function current_time_target(mac) {
+	const ctx = clock_context();
+	let hit = null;
+
+	if (ctx.now === null || ctx.prev === null)
+		return { target: 'allow', source: 'none', section: null };
+
+	for (let r in enabled_timerules()) {
+		if (norm_mac(r.device_mac) !== mac)
+			continue;
+
+		const m = rule_matches(r, ctx.now, ctx.prev);
+
+		if (m.matched && m.cycle)
+			hit = r;
+	}
+
+	if (hit === null)
+		return { target: 'allow', source: 'none', section: null };
+
+	return { target: rule_target(hit), source: 'timer', section: hit['.name'] };
+}
+
+function iso_at(tz, epoch) {
+	return trim(run(`${tz_prefix(tz)}date -d @${epoch} '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null`).out);
+}
+
+/* Epoch of the local midnight owning this epoch: read from the printed hour,
+ * minute and second rather than epoch division, so no floor() or daylight
+ * saving arithmetic is needed. The seconds have to go too - a day frame built
+ * with any remainder in it shifts every event of that day by the same amount,
+ * and a tick that lands a second late then misses the minute for good. */
+function local_midnight(tz, epoch) {
+	const p = local_parts(tz, epoch);
+
+	if (p === null)
+		return null;
+
+	return epoch - (p.hour * 3600 + p.min * 60 + p.sec);
+}
+
+function bucket_of(buckets, minute) {
+	const key = `${minute}`;
+
+	return is_set(buckets[key]) ? buckets[key] : [];
+}
+
+function push_bucket(buckets, minute, item) {
+	const key = `${minute}`;
+
+	if (!is_set(buckets[key]))
+		buckets[key] = [];
+
+	push(buckets[key], item);
+}
+
+/* The local midnights owning [from, to], oldest first, one entry per day
+ * holding today's parts and the previous day's: a cross-midnight window's end
+ * event runs on the following day but is filtered by the cycle of the day it
+ * started on. One `date` probe per day - yesterday's answer is carried
+ * forward, the previous day only needs probing once for the first entry. */
+function day_range(tz, from, to, limit) {
+	const out = [];
+	let mid = local_midnight(tz, from);
+	let pp = mid === null ? null : local_parts(tz, mid - 60);
+	let guard = 0;
+
+	while (mid !== null && pp !== null && mid <= to && guard < limit) {
+		const p = local_parts(tz, mid + 60);
+
+		if (p === null)
+			break;
+
+		push(out, { mid: mid, p: p, pp: pp });
+
+		pp = p;
+		mid = mid + 86400;
+		guard++;
+	}
+
+	return out;
+}
+
+/* Every event due in (from, to], oldest first. Within one minute an end runs
+ * before a start, so a window closing at 10:00 cannot cancel one opening at
+ * 10:00 before the operator sees the flip; inside the same group the UCI
+ * section order decides. Rules are never compared against each other. */
+function events_in_range(rules, from, to, tz) {
+	const out = [];
+	const days = day_range(tz, from, to, (((to - from) / 86400) | 0) + 2);
+
+	for (let d in days) {
+		const starts = {};
+		const ends = {};
+
+		for (let i = 0; i < length(rules); i++) {
+			const r = rules[i];
+			const w = rule_window(r);
+
+			if (!w.valid)
+				continue;
+
+			const base = { mac: norm_mac(r.device_mac), section: r['.name'], name: r.name ?? null };
+
+			if (cycle_matches(r, d.p))
+				push_bucket(starts, w.start, merge(base, { epoch: d.mid + w.start * 60, target: rule_target(r), kind: 'start' }));
+
+			if (w.end !== null && (w.cross ? cycle_matches(r, d.pp) : cycle_matches(r, d.p)))
+				push_bucket(ends, w.end, merge(base, { epoch: d.mid + w.end * 60, target: flip(rule_target(r)), kind: 'end' }));
+		}
+
+		for (let t = 0; t < 1440; t++) {
+			for (let e in bucket_of(ends, t))
+				if (e.epoch > from && e.epoch <= to)
+					push(out, e);
+
+			for (let e in bucket_of(starts, t))
+				if (e.epoch > from && e.epoch <= to)
+					push(out, e);
+		}
+	}
+
+	return out;
+}
+
+/* The first event a rule will produce after now, or null. The caller builds one
+ * shared day frame (see NEXT_EVENT_DAYS) and every day of it precedes the next,
+ * so the first day holding a candidate already answers the question. */
+function rule_next_event(rule, tz, now, days) {
+	const w = rule_window(rule);
+
+	if (!w.valid)
+		return null;
+
+	for (let d in days) {
+		let cand = null;
+
+		if (cycle_matches(rule, d.p) && d.mid + w.start * 60 > now)
+			cand = { epoch: d.mid + w.start * 60, target: rule_target(rule), kind: 'start' };
+
+		if (w.end !== null && (w.cross ? cycle_matches(rule, d.pp) : cycle_matches(rule, d.p)) && d.mid + w.end * 60 > now &&
+				(cand === null || d.mid + w.end * 60 < cand.epoch))
+			cand = { epoch: d.mid + w.end * 60, target: flip(rule_target(rule)), kind: 'end' };
+
+		if (cand !== null)
+			return {
+				epoch: cand.epoch,
+				kind: cand.kind,
+				target: cand.target,
+				at: iso_at(tz, cand.epoch),
+				minutes: ((cand.epoch - now) / 60) | 0
+			};
+	}
+
+	return null;
+}
+
+/* ── reachability ─────────────────────────────────────── */
+
+/* These four sit above the state machine on purpose: ucode resolves a sibling
+ * function only if it was already declared, so tick() and rebuild() would abort
+ * with "access to undeclared variable" if the helpers moved back down. */
+
+function arp_table() {
+	const data = readfile(ARP);
+	const out = [];
+
+	if (!data)
+		return out;
+
+	for (let line in split(data, '\n')) {
+		const m = match(line, /^([0-9.]+)[ \t]+0x1[ \t]+0x[26][ \t]+([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})[ \t]+\S+[ \t]+(\S+)/i);
+
+		if (m && is_ipv4(m[1]) && m[2] !== '00:00:00:00:00:00')
+			push(out, { ip: m[1], mac: norm_mac(m[2]), iface: m[3] });
+	}
+
+	return out;
+}
+
+function lease_table() {
+	const data = readfile(LEASES);
+	const out = [];
+
+	if (!data)
+		return out;
+
+	for (let line in split(data, '\n')) {
+		const f = filter(split(line, ' '), function (x) { return x !== ''; });
+
+		if (length(f) < 4)
+			continue;
+
+		const mac = norm_mac(f[1]);
+
+		if (mac !== null)
+			push(out, { mac, ip: f[2], hostname: f[3] === '*' ? null : f[3] });
+	}
+
+	return out;
+}
+
+function mac_to_ip(mac, arp, leases) {
+	for (let l in leases)
+		if (l.mac === mac)
+			return l.ip;
+
+	for (let a in arp)
+		if (a.mac === mac)
+			return a.ip;
+
+	return null;
+}
+
+/* ── conntrack ────────────────────────────────────────── */
+
+function clean_conntrack(ip) {
+	if (!is_ipv4(ip) || !has(CT_BIN, "x"))
+		return false;
+
+	run(`${CT_BIN} -D --orig-src ${shellquote(ip)} >/dev/null 2>&1`);
+	run(`${CT_BIN} -D --orig-dst ${shellquote(ip)} >/dev/null 2>&1`);
+
+	return true;
+}
+
+/* ── state machine ────────────────────────────────────── */
+
+/* config timerstate holds one row per device the engine has ever acted on and
+ * is the only thing the kernel chain is converged onto. Time rules and manual
+ * clicks are merely sources feeding it. */
+function state_index() {
+	const out = {};
+
+	for (let s in sections('timerstate')) {
+		const mac = norm_mac(s.mac);
+
+		if (mac !== null)
+			out[mac] = s['.name'];
+	}
+
+	return out;
+}
+
+/* The single entry point every state change goes through. Logging happens even
+ * when the state did not move: an executed event is not the same as a flip. */
+function apply_event(index, mac, target, source, section, when, ip) {
+	let sec = index[mac] ?? null;
+
+	if (sec === null) {
+		sec = uci.add(CFG, 'timerstate');
+
+		if (!is_set(sec))
+			return false;
+
+		index[mac] = sec;
+	}
+
+	const before = `${uci.get(CFG, sec, 'state') ?? ''}`;
+	const label = is_set(section) && section !== '' ? ` ${section}` : '';
+	/* A replayed backlog lands in the log several minutes after the moment it
+	 * belongs to, so the line names that moment as well as the write time. */
+	const moment = length(`${when}`) >= 16 ? ` @ ${substr(`${when}`, 11, 5)}` : '';
+
+	set_option(sec, 'mac', mac);
+	set_option(sec, 'state', target);
+	set_option(sec, 'source', source);
+	set_option(sec, 'section', section ?? '');
+	set_option(sec, 'at', when);
+
+	if (is_set(ip))
+		set_option(sec, 'ip', ip);
+	else if (!is_set(uci.get(CFG, sec, 'ip')))
+		set_option(sec, 'ip', 'unknown');
+
+	log('info', `event ${mac} -> ${target} (${source}${label}${moment}${before === target ? ', state unchanged' : ''})`);
+
+	return true;
+}
+
+function read_last_tick() {
+	const raw = trim(`${readfile(TICK_FILE) ?? ''}`);
+
+	return match(raw, /^[0-9]+$/) === null ? null : raw * 1;
+}
+
+/* Bookkeeping lives in /tmp: committing a UCI option every minute would be a
+ * thousand flash writes a day for a value that means nothing after a reboot. */
+function write_last_tick(epoch) {
+	run('mkdir -p /tmp/run >/dev/null 2>&1');
+	writefile(TICK_FILE, `${epoch}\n`);
+}
+
+function tick() {
+	load_cfg();
+
+	const now = time();
+
+	if (!clock_ok())
+		return { ok: true, events: 0, skipped: 'clock' };
+
+	/* While the global switch is off the clock stays silent and the tick
+	 * pointer keeps moving, so switching back on does not replay a day. */
+	if (!global_enabled()) {
+		write_last_tick(now);
+		return { ok: true, events: 0, skipped: 'global_off' };
+	}
+
+	let from = read_last_tick();
+
+	if (from === null || from < now - MAX_TICK_MINUTES * 60)
+		from = now - MAX_TICK_MINUTES * 60;
+
+	const tz = timezone();
+	const rules = enabled_timerules();
+	const events = length(rules) ? events_in_range(rules, from, now, tz) : [];
+
+	if (!length(events)) {
+		write_last_tick(now);
+		return { ok: true, events: 0, from, to: now };
+	}
+
+	const index = state_index();
+	const arp = arp_table();
+	const leases = lease_table();
+
+	for (let e in events)
+		apply_event(index, e.mac, e.target, 'timer', e.section, iso_at(tz, e.epoch), mac_to_ip(e.mac, arp, leases));
+
+	/* Only advance the pointer once the events are on disk: re-running an
+	 * applied event is idempotent, losing one to a failed commit is not. */
+	if (!persist())
+		return { ok: false, error: 'uci commit failed', events: length(events) };
+
+	write_last_tick(now);
+
+	return { ok: true, events: length(events), from, to: now };
+}
+
+function digest(macs) {
+	const body = `${strjoin(sort(macs), '\n')}\n`;
+
+	if (writefile('/tmp/netcontrol.digest', body) === null)
+		return '';
+
+	return substr(trim(run('sha256sum /tmp/netcontrol.digest 2>/dev/null').out), 0, 16);
+}
+
+function record_digest(macs) {
+	const value = digest(macs);
+
+	if (value === '' || uci.get(CFG, 'global') === null || get_global('expected_hash', '') === value)
+		return;
+
+	set_option('global', 'expected_hash', value);
+	persist();
+}
+
+/* Pure version of the convergence pass - the status page, the preview tab and
+ * rebuild() all read the same plan. */
+function plan(enabled, states) {
+	const blocks = [];
+	const decisions = {};
+
+	for (let s in states) {
+		const mac = norm_mac(s.mac);
+
+		if (mac === null)
+			continue;
+
+		const source = s.source === 'manual' ? 'manual' : 'timer';
+		const held = s.state === 'block';
+
+		/* A manual decision is the operator's own words and survives the global
+		 * switch; a clock decision does not. */
+		const blocked = source === 'manual' ? held : (enabled && held);
+		let ip = s.ip ?? null;
+
+		if (ip === 'unknown')
+			ip = null;
+
+		decisions[mac] = {
+			blocked,
+			source,
+			state: held ? 'block' : 'allow',
+			section: s.section ?? null,
+			at: s.at ?? null,
+			rule_type: 'block',
+			reason: source === 'manual' ? 'state_from_manual' : (blocked || enabled ? 'state_from_timer' : 'global_off')
+		};
+
+		if (blocked)
+			push(blocks, { mac, ip, section: `${source}:${s['.name']}`, rule_type: 'block' });
+	}
+
+	return { blocks, decisions };
+}
+
+/* Converge the kernel chain onto the state machine. */
+function rebuild() {
+	load_cfg();
+
+	if (!ensure_base())
+		return { ok: false, error: 'nftables unavailable', blocks: [] };
+
+	const wanted = plan(global_enabled(), sections('timerstate'));
+	const before = {};
+
+	for (let r in chain_rules())
+		before[r.mac] = true;
+
+	if (!nft_apply(batch_lines(wanted.blocks))) {
+		log('err', 'atomic rebuild failed');
+		return { ok: false, error: 'nft apply failed', blocks: wanted.blocks };
+	}
+
+	/* Established flows keep a freshly blocked device talking until conntrack
+	 * forgets them, so tear them down as soon as the drop rules are in. */
+	const fresh = filter(wanted.blocks, function (b) { return !is_set(before[b.mac]); });
+
+	if (length(fresh)) {
+		const arp = arp_table();
+		const leases = lease_table();
+
+		for (let b in fresh)
+			clean_conntrack(b.ip ?? mac_to_ip(b.mac, arp, leases));
+	}
+
+	record_digest(map(wanted.blocks, function (b) { return b.mac; }));
+	log('info', `reconciled: ${length(wanted.blocks)} device(s) blocked`);
+
+	return { ok: true, blocked: length(wanted.blocks), blocks: wanted.blocks, decisions: wanted.decisions };
+}
+
+
+/* ── manual control ───────────────────────────────────── */
+
+/* The row the manual control page lists. It records what the operator asked
+ * for; the state machine, not this row, decides what the kernel does. */
+function manual_row(mac) {
+	for (let r in sections('rule'))
+		if (norm_mac(r.mac) === mac)
+			return r;
+
+	return null;
+}
+
+function timed_macs() {
+	const out = {};
+
+	for (let r in enabled_timerules())
+		out[norm_mac(r.device_mac)] = true;
+
+	return out;
+}
+
+/* A device brought under manual control is also registered in the inventory so
+ * the device list page shows it. The registration writes no kernel rule of its
+ * own, and deleting the manual row later leaves it in place. */
+function ensure_device(mac, label, ip) {
+	const existing = first(sections('device'), function (d) { return norm_mac(d.mac) === mac; });
+
+	if (existing !== null) {
+		if (trim(`${label ?? ''}`) !== '' && trim(`${existing.name ?? ''}`) === '')
+			set_option(existing['.name'], 'name', label);
+
+		if (is_set(ip) && trim(`${existing.ip ?? ''}`) === '')
+			set_option(existing['.name'], 'ip', ip);
+
+		return existing['.name'];
+	}
+
+	const section = uci.add(CFG, 'device');
+
+	if (!is_set(section))
+		return null;
+
+	set_option(section, 'mac', mac);
+	set_option(section, 'name', trim(`${label ?? ''}`) !== '' ? `${label}` : mac);
+
+	if (is_set(ip))
+		set_option(section, 'ip', ip);
+
+	return section;
+}
+
+function device_index() {
+	const out = {};
+
+	for (let d in sections('device')) {
+		const mac = norm_mac(d.mac);
+
+		if (mac !== null)
+			out[mac] = d['.name'];
+	}
+
+	return out;
+}
+
+/* A time rule owns a device whether or not the inventory has heard of it yet,
+ * so saving a rule registers the MAC and lets the rule name the device. The
+ * stored address is canonicalised to lower case on the way, which is what both
+ * nftables and every comparison here expect. */
+function sync_devices() {
+	const index = device_index();
+	let dirty = false;
+
+	for (let r in sections('timerule')) {
+		const raw = `${r.device_mac ?? ''}`;
+		const mac = norm_mac(raw);
+
+		if (mac === null)
+			continue;
+
+		if (raw !== mac) {
+			set_option(r['.name'], 'device_mac', mac);
+			dirty = true;
+		}
+
+		const label = trim(`${r.device_name ?? ''}`);
+
+		if (!is_set(index[mac])) {
+			const section = uci.add(CFG, 'device');
+
+			if (!is_set(section))
+				continue;
+
+			set_option(section, 'mac', mac);
+			set_option(section, 'name', label !== '' ? label : mac);
+			index[mac] = section;
+			dirty = true;
+		}
+
+		if (label !== '' && `${uci.get(CFG, index[mac], 'name') ?? ''}` !== label) {
+			set_option(index[mac], 'name', label);
+			dirty = true;
+		}
+	}
+
+	if (dirty && !persist())
+		return false;
+
+	return true;
+}
+
+/* One time clean up of what the window evaluator used to need: rule_mode,
+ * override and device_enabled have no meaning now that a rule carries its own
+ * target and runs twice a cycle. */
+function migrate_legacy() {
+	let dirty = false;
+
+	for (let r in sections('timerule')) {
+		for (let k in ['rule_mode', 'override', 'device_enabled']) {
+			if (uci.get(CFG, r['.name'], k) === null)
+				continue;
+
+			uci.delete(CFG, r['.name'], k);
+			dirty = true;
+		}
+
+		if (uci.get(CFG, r['.name'], 'action') === null) {
+			set_option(r['.name'], 'action', 'block');
+			dirty = true;
+		}
+	}
+
+	for (let r in sections('rule')) {
+		if (uci.get(CFG, r['.name'], 'override') === null)
+			continue;
+
+		uci.delete(CFG, r['.name'], 'override');
+		dirty = true;
+	}
+
+	if (dirty && !persist())
+		return false;
+
+	return true;
+}
+
+function manual_set(target, action, name) {
+	if (target === null)
+		return { ok: false, error: 'invalid mac address' };
+
+	const wanted = action === 'allow' ? 'allow' : 'block';
+
+	load_cfg();
+
+	const arp = arp_table();
+	const leases = lease_table();
+	const ip = mac_to_ip(target, arp, leases);
+	const row = manual_row(target);
+	const section = row?.['.name'] ?? uci.add(CFG, 'rule');
+
+	if (!is_set(section))
+		return { ok: false, error: 'cannot create rule section' };
+
+	const host = first(leases, function (l) { return l.mac === target; });
+
+	/* Re-adding a device that already has a row keeps its label unless the
+	 * caller supplies a new one. */
+	const label = trim(`${name ?? ''}`) !== '' ? `${name}`
+		: (row?.name ?? host?.hostname ?? target);
+
+	set_option(section, 'mac', target);
+	set_option(section, 'name', label);
+	set_option(section, 'ip', ip ?? 'unknown');
+	set_option(section, 'source', 'manual');
+	set_option(section, 'action', wanted);
+	set_option(section, 'rule_type', wanted === 'allow' ? 'manual_allow' : 'manual_block');
+	set_option(section, 'enabled', '1');
+	set_option(section, 'updated_at', iso_now(timezone()));
+
+	if (uci.get(CFG, section, 'created_at') === null)
+		set_option(section, 'created_at', iso_now(timezone()));
+
+	ensure_device(target, label, ip);
+
+	const index = state_index();
+
+	apply_event(index, target, wanted, 'manual', section, iso_now(timezone()), ip);
+
+	if (!persist())
+		return { ok: false, error: 'uci commit failed' };
+
+	const res = rebuild();
+
+	if (!res.ok)
+		return res;
+
+	const blocked = any(res.blocks, function (b) { return b.mac === target; });
+
+	log('info', `manual ${wanted} ${target} (${length(res.blocks)} device(s) blocked)`);
+
+	return { ok: true, mac: target, action: wanted, section, ip, blocked, devices: res.blocked };
+}
+
+/* Withdrawing the row is itself an event, and its target is what the clock says
+ * for this device right now - allow when no enabled rule covers the moment.
+ * Deleting it never touches the time rules or the inventory. */
+function manual_delete(target) {
+	const mac = norm_mac(target);
+
+	if (mac === null && !is_section_id(target))
+		return { ok: false, error: 'not a mac address or section id' };
+
+	load_cfg();
+
+	const rows = sections('rule');
+	const removed = [];
+	let address = mac;
+
+	for (let r in rows) {
+		if (mac !== null ? norm_mac(r.mac) !== mac : r['.name'] !== target)
+			continue;
+
+		if (address === null)
+			address = norm_mac(r.mac);
+
+		uci.delete(CFG, r['.name']);
+		push(removed, r['.name']);
+	}
+
+	if (!length(removed) || address === null)
+		return { ok: false, error: 'this device is not under manual control' };
+
+	const restore = current_time_target(address);
+	const arp = arp_table();
+	const leases = lease_table();
+	const index = state_index();
+
+	apply_event(index, address, restore.target, restore.source === 'none' ? 'none' : 'timer',
+		restore.section, iso_now(timezone()), mac_to_ip(address, arp, leases));
+
+	if (!persist())
+		return { ok: false, error: 'uci commit failed' };
+
+	const res = rebuild();
+
+	if (!res.ok)
+		return res;
+
+	log('info', `deleted ${length(removed)} manual row(s) for ${address}, state back to ${restore.target}`);
+
+	return { ok: true, mac: address, removed: length(removed), state: restore.target, devices: res.blocked };
+}
+
+/* ── cron ─────────────────────────────────────────────── */
+
+function watchdog_setting() {
+	return clamp_int(get_global('watchdog_interval', DEFAULT_WATCHDOG_INTERVAL),
+		DEFAULT_WATCHDOG_INTERVAL, MIN_WATCHDOG_INTERVAL, MAX_WATCHDOG_INTERVAL);
+}
+
+/* The plugin owns exactly two tagged lines: the per minute time rule tick and
+ * the watchdog reconcile. They are the backstop for a dead evaluation daemon,
+ * so crontab stays in sync even when the loop is not running. */
+function sync_cron() {
+	load_cfg();
+
+	const lines = [];
+	const existing = readfile(CRON_FILE);
+
+	if (is_set(existing))
+		for (let line in split(existing, '\n'))
+			if (line !== '' && index(line, CRON_TAG) < 0)
+				push(lines, line);
+
+	push(lines, `* * * * * /bin/ubus call luci.netcontrol timerules '{}' ${CRON_TAG}timerules`);
+	push(lines, `*/${watchdog_setting()} * * * * /bin/ubus call luci.netcontrol watchdog '{}' ${CRON_TAG}watchdog`);
+
+	const body = `${strjoin(lines, '\n')}\n`;
+
+	if (writefile('/tmp/netcontrol.cron.tmp', body) === null) {
+		log('err', 'failed to write crontab');
+		return false;
+	}
+
+	if (run(`mv /tmp/netcontrol.cron.tmp ${shellquote(CRON_FILE)} && chmod 600 ${shellquote(CRON_FILE)}`).rc !== 0) {
+		log('err', 'failed to install crontab');
+		return false;
+	}
+
+	init_action('cron', 'reload');
+
+	return true;
+}
+
+/* ── eval loop ────────────────────────────────────────── */
+
+function eval_interval() {
+	return clamp_int(get_global('eval_interval', DEFAULT_EVAL_INTERVAL),
+		DEFAULT_EVAL_INTERVAL, MIN_EVAL_INTERVAL, MAX_EVAL_INTERVAL);
+}
+
+function daemon_pid() {
+	const raw = trim(`${readfile(DAEMON_PID) ?? ''}`);
+
+	if (match(raw, /^[0-9]+$/) === null)
+		return null;
+
+	const pid = raw * 1;
+
+	return run(`kill -0 ${pid} 2>/dev/null`).rc === 0 ? pid : null;
+}
+
+function stop_daemon() {
+	const pid = daemon_pid();
+
+	if (pid !== null) {
+		/* TERM, then escalate: the loop spends up to eval_interval seconds inside
+		 * sleep, so a graceful kill can linger long enough that start() would
+		 * still see the old PID alive and refuse to launch a new one. */
+		run(`kill ${pid} 2>/dev/null`);
+
+		for (let i = 0; i < 3; i++) {
+			if (run(`kill -0 ${pid} 2>/dev/null`).rc !== 0)
+				break;
+
+			run('sleep 1');
+		}
+
+		if (run(`kill -0 ${pid} 2>/dev/null`).rc === 0)
+			run(`kill -9 ${pid} 2>/dev/null`);
+	}
+
+	run(`rm -f ${shellquote(DAEMON_PID)} ${shellquote(DAEMON_TICK)}`);
+
+	return { ok: true, running: daemon_pid() !== null };
+}
+
+function start_daemon() {
+	load_cfg();
+
+	const interval = eval_interval();
+
+	if (daemon_pid() !== null) {
+		if (trim(`${readfile(DAEMON_TICK) ?? ''}`) === `${interval}`)
+			return { ok: true, running: true, interval };
+
+		stop_daemon();
+	}
+
+	run('mkdir -p /tmp/run >/dev/null 2>&1');
+
+	if (writefile(DAEMON_TICK, `${interval}\n`) === null)
+		return { ok: false, error: 'cannot write tick file' };
+
+	/* setsid + background: the loop has to outlive this ubus call, and its
+	 * interval is recorded so apply() knows when to restart it. */
+	run(`setsid ash -c 'while sleep ${interval}; do /bin/ubus call luci.netcontrol timerules >/dev/null 2>&1; done' >/dev/null 2>&1 & echo $! > ${shellquote(DAEMON_PID)}`);
+
+	return { ok: true, running: daemon_pid() !== null, interval };
+}
+
+/* ── discovery ────────────────────────────────────────── */
+
+function discover() {
+	load_cfg();
+
+	const online = {};
+	const leases = {};
+	const order = [];
+	const states = {};
+	const wanted = plan(global_enabled(), sections('timerstate'));
+
+	for (let s in sections('timerstate')) {
+		const mac = norm_mac(s.mac);
+
+		if (mac !== null)
+			states[mac] = s;
+	}
+
+	for (let a in arp_table())
+		online[a.mac] = a.ip;
+
+	for (let l in lease_table()) {
+		if (!is_set(leases[l.mac])) {
+			leases[l.mac] = l;
+			push(order, l.mac);
+		}
+	}
+
+	for (let line in split(run('ip -4 neigh show 2>/dev/null').out, '\n')) {
+		const m = match(line, /^([0-9.]+) dev (\S+).*lladdr ([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})/i);
+
+		if (!m)
+			continue;
+
+		const mac = norm_mac(m[3]);
+
+		if (mac === null || is_set(leases[mac]))
+			continue;
+
+		leases[mac] = { mac, ip: m[1], hostname: null };
+		push(order, mac);
+	}
+
+	for (let mac in sort(keys(states)))
+		if (!is_set(leases[mac])) {
+			leases[mac] = { mac, ip: null, hostname: null };
+			push(order, mac);
+		}
+
+	const devices = [];
+
+	for (let mac in order) {
+		const st = states[mac];
+		const d = wanted.decisions[mac] ?? null;
+
+		push(devices, {
+			mac,
+			ip: leases[mac]?.ip ?? st?.ip ?? null,
+			hostname: leases[mac]?.hostname ?? null,
+			online: is_set(online[mac]),
+			restricted: d?.blocked === true,
+			enabled: is_set(st),
+			rule_type: is_set(st) ? (st.source === 'manual' ? 'manual' : 'timer') : null,
+			section: st?.['.name'] ?? null,
+			name: st?.name ?? leases[mac]?.hostname ?? null
+		});
+	}
+
+	return devices;
+}
+
+/* ── manual control surface ───────────────────────────── */
+
+/* One row per MAC a manual row owns: the action the operator chose beside what
+ * the state machine and the kernel really hold for that device. */
+function managed() {
+	load_cfg();
+
+	const by_rule = group_by(sections('rule'), 'mac');
+	const states = group_by(sections('timerstate'), 'mac');
+	const timed = timed_macs();
+	const arp = arp_table();
+	const leases = {};
+	const online = {};
+	const held = {};
+	const out = [];
+
+	for (let a in arp)
+		online[a.mac] = a.ip;
+
+	for (let l in lease_table())
+		leases[l.mac] = l;
+
+	for (let r in chain_rules())
+		held[r.mac] = true;
+
+	for (let mac in sort(keys(by_rule))) {
+		const rows = by_rule[mac];
+		const named = first(rows, function (r) { return is_set(r.name) && trim(`${r.name}`) !== ''; });
+		const row = rows[0];
+		const st_rows = states[mac] ?? [];
+		const st = length(st_rows) ? st_rows[0] : null;
+		const stored = row.ip === 'unknown' ? null : row.ip;
+
+		push(out, {
+			mac,
+			ip: leases[mac]?.ip ?? stored ?? mac_to_ip(mac, arp, []),
+			name: named?.name ?? leases[mac]?.hostname ?? null,
+			online: is_set(online[mac]),
+			blocked: is_set(held[mac]),
+			action: row.action ?? 'block',
+			section: row['.name'],
+			state: st?.state ?? null,
+			source: st?.source ?? null,
+			event_at: st?.at ?? null,
+			timed: is_set(timed[mac]),
+			created_at: row.created_at ?? null,
+			updated_at: row.updated_at ?? null
+		});
+	}
+
+	return {
+		devices: out,
+		enabled: global_enabled(),
+		local_time: iso_now(timezone()),
+		timezone: get_global('timezone', 'Asia/Shanghai')
+	};
+}
+
+/* ── status ───────────────────────────────────────────── */
+
+function same_set(actual, blocks) {
+	const want = sort(map(blocks, function (b) { return b.mac; }));
+
+	if (length(want) !== length(actual))
+		return false;
+
+	for (let i = 0; i < length(actual); i++)
+		if (actual[i] !== want[i])
+			return false;
+
+	return true;
+}
+
+function status() {
+	load_cfg();
+
+	const ctx = clock_context();
+	const enabled = global_enabled();
+	const states = sections('timerstate');
+	const by_state = group_by(states, 'mac');
+	const manual_rows = group_by(sections('rule'), 'mac');
+	const wanted = plan(enabled, states);
+	const actual = kernel_macs();
+	const blocks = wanted.blocks;
+	const leases = lease_table();
+	const arp = arp_table();
+	const online = {};
+
+	for (let a in arp)
+		online[a.mac] = a.ip;
+
+	return {
+		enabled,
+		auto_restore: get_global('auto_restore', '1') !== '0',
+		timezone: get_global('timezone', 'Asia/Shanghai'),
+		timezone_valid: is_timezone(get_global('timezone', 'Asia/Shanghai')),
+		watchdog_interval: watchdog_setting(),
+		eval_interval: eval_interval(),
+		offload_detected: get_global('offload_detected', '0') === '1',
+		expected_hash: get_global('expected_hash', ''),
+		clock_ok: clock_ok(),
+		clock_source: 'system',
+		nft_available: nft_available(),
+		table_exists: table_exists(),
+		chain_exists: chain_exists(),
+		local_time: iso_now(ctx.tz),
+		utc_time: trim(run('date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null').out),
+		daemon_running: daemon_pid() !== null,
+		timerule_count: length(sections('timerule')),
+		state_count: length(states),
+		drop_rules: length(chain_rules()),
+		kernel_macs: actual,
+		expected_macs: sort(map(blocks, function (b) { return b.mac; })),
+		consistent: same_set(actual, blocks),
+		devices: map(states, function (s) {
+			const mac = norm_mac(s.mac);
+			const row = first(manual_rows[mac] ?? [], function (r) { return true; });
+			const named = first(by_state[mac] ?? [], function (x) { return true; });
+
+			return {
+				section: s['.name'],
+				mac,
+				name: row?.name ?? named?.name ?? mac,
+				source: s.source === 'manual' ? 'manual' : 'timer',
+				state: s.state === 'block' ? 'block' : 'allow',
+				rule_section: s.section ?? null,
+				at: s.at ?? null,
+				ip: (s.ip && s.ip !== 'unknown') ? s.ip : mac_to_ip(mac, arp, leases),
+				enabled: true,
+				online: is_set(online[mac]),
+				blocked: wanted.decisions[mac]?.blocked === true,
+				created_at: row?.created_at ?? null
+			};
+		})
+	};
+}
+
+/* ── watchdog ─────────────────────────────────────────── */
+
+function detect_offload() {
+	/* A separate cursor: loading another package into the netcontrol cursor
+	 * would drop any delta it is still holding. */
+	const fw = cursor();
+
+	if (fw.load('firewall')) {
+		if (to_int(fw.get('firewall', 'defaults', 'flow_offloading'), 0) === 1)
+			return true;
+
+		return to_int(fw.get('firewall', 'defaults', 'flow_offloading_hw'), 0) === 1;
+	}
+
+	/* No firewall UCI to read: fall back to the kernel, where an offload
+	 * flowtable only exists if fw4 was told to create one. A loaded
+	 * nf_flow_table module is not evidence - it is built as a module on most
+	 * targets even when offloading stays disabled. */
+	return match(run(`${NFT_BIN} list flowtables inet 2>/dev/null`).out, /flowtable [A-Za-z0-9_-]+ \{/) !== null;
+}
+
+function watchdog() {
+	load_cfg();
+
+	const detected = detect_offload();
+	const tz_valid = is_timezone(get_global('timezone', 'Asia/Shanghai'));
+	const snap = status();
+
+	const want_offload = detected ? '1' : '0';
+	const want_tz = tz_valid ? '1' : '0';
+	let dirty = false;
+
+	/* uci.set stages into the very context uci.get reads, so the commit
+	 * decision has to be taken from the pre-write comparison: re-reading the
+	 * option below would hide the change and leave an invalid->valid flip
+	 * uncommitted, keeping the stale warning on screen forever. */
+	if (get_global('offload_detected', '0') !== want_offload) {
+		set_option('global', 'offload_detected', want_offload);
+		dirty = true;
+	}
+
+	if (get_global('tz_valid', '1') !== want_tz) {
+		set_option('global', 'tz_valid', want_tz);
+		dirty = true;
+	}
+
+	if (dirty)
+		persist();
+
+	if (!tz_valid)
+		log('warn', 'timezone data missing, install zoneinfo-asia');
+
+	if (!clock_ok()) {
+		log('warn', 'system clock not synchronised, skipping reconcile');
+		return { ok: false, consistent: snap.consistent, reason: 'clock', offload: detected };
+	}
+
+	if (snap.consistent)
+		return { ok: true, consistent: true, offload: detected };
+
+	log('warn', `state drift detected: kernel ${strjoin(snap.kernel_macs, ' ')} vs plan ${strjoin(snap.expected_macs, ' ')}`);
+
+	const res = rebuild();
+
+	return { ok: res.ok, consistent: res.ok, offload: detected, rebuilt: res.blocked };
+}
+
+/* ── preview ──────────────────────────────────────────── */
+
+/* What the state machine holds for each device, and the next moment each of
+ * its rules will act. Nothing here recomputes a window: the answer is the
+ * recorded state, and the future is the event stream. */
+function preview_snapshot(wanted) {
+	load_cfg();
+
+	const ctx = clock_context();
+	const enabled = global_enabled();
+	const states = sections('timerstate');
+	const by_state = group_by(states, 'mac');
+	const by_time = group_by(sections('timerule'), 'device_mac');
+	const by_rule = group_by(sections('rule'), 'mac');
+	const held = {};
+	const out = [];
+
+	for (let r in chain_rules())
+		held[r.mac] = true;
+
+	/* One day frame for the whole reply: every rule then scans cached midnights
+	 * instead of spawning its own `date` per day. */
+	const frame = day_range(ctx.tz, ctx.epoch, ctx.epoch + NEXT_EVENT_DAYS * 86400, NEXT_EVENT_DAYS + 1);
+
+	for (let mac in sort(keys(merge(merge(by_state, by_time), by_rule)))) {
+		if (wanted !== null && mac !== wanted)
+			continue;
+
+		const rows = by_state[mac] ?? [];
+		const st = length(rows) ? rows[0] : null;
+		const source = st?.source ?? null;
+		const blocked = is_set(held[mac]);
+
+		push(out, {
+			mac,
+			blocked,
+			state: st?.state ?? 'allow',
+			source,
+			section: st?.section ?? null,
+			at: st?.at ?? null,
+			reason: st === null ? 'unmanaged' : (source === 'manual' ? 'state_from_manual' : (enabled ? 'state_from_timer' : 'global_off')),
+			rules: map(by_time[mac] ?? [], function (r) {
+				const w = rule_window(r);
+				const live = is_bool(r.enabled, true) && enabled;
+				const next = w.valid && live ? rule_next_event(r, ctx.tz, ctx.epoch, frame) : null;
+
+				return {
+					section: r['.name'],
+					name: r.name ?? r['.name'],
+					action: rule_target(r),
+					cycle_type: r.cycle_type ?? 'daily',
+					all_day: is_bool(r.all_day, false),
+					start: r.time_start ?? null,
+					end: r.time_end ?? null,
+					enabled: is_bool(r.enabled, true),
+					valid: w.valid,
+					next: next === null ? null : { at: next.at, kind: next.kind, target: next.target, minutes: next.minutes }
+				};
+			})
+		});
+	}
+
+	return { devices: out, local_time: iso_now(ctx.tz), timezone: get_global('timezone', 'Asia/Shanghai') };
+}
+
+/* ── public API ───────────────────────────────────────── */
+
+const methods = {
+	/* Capability probe the views use to hide unavailable sections. */
+	stat: {
+		call: function () {
+			return {
+				nftables: nft_available(),
+				conntrack: has(CT_BIN, "x"),
+				leases: has(LEASES, "r"),
+				cron: has(CRON_FILE, "r")
+			};
+		}
+	},
+
+	status: {
+		call: function () {
+			return status();
+		}
+	},
+
+	devices: {
+		call: function () {
+			return { devices: discover() };
+		}
+	},
+
+	/* Single hook the views call after form.Map has committed UCI. */
+	apply: {
+		call: function () {
+			load_cfg();
+
+			migrate_legacy();
+			sync_devices();
+
+			const cron = sync_cron();
+			const daemon = start_daemon();
+			const res = rebuild();
+
+			return { result: { ok: res.ok && cron, cron, daemon, blocked: res.blocked, error: res.error } };
+		}
+	},
+
+	/* Rows for the manual control page: one per rule section the operator owns. */
+	managed: {
+		call: function () {
+			return managed();
+		}
+	},
+
+	manualSet: {
+		args: { mac: 'string', action: 'string', name: 'string' },
+		call: function (request) {
+			const a = request.args ?? {};
+
+			return { result: manual_set(norm_mac(a.mac), a.action, a.name) };
+		}
+	},
+
+	manualDelete: {
+		args: { mac: 'string' },
+		call: function (request) {
+			return { result: manual_delete(`${(request.args ?? {}).mac ?? ''}`) };
+		}
+	},
+
+	preview: {
+		args: { mac: 'string' },
+		call: function (request) {
+			return { result: preview_snapshot(norm_mac((request.args ?? {}).mac)) };
+		}
+	},
+
+	/* The evaluation tick: run every event due since the last call, then
+	 * converge the chain onto the state machine. */
+	timerules: {
+		call: function () {
+			const t = tick();
+
+			if (!clock_ok())
+				return { result: { ok: true, skipped: 'clock', events: 0, blocked: 0 } };
+
+			const res = rebuild();
+
+			return { result: merge(t, { blocked: res.blocked, ok: t.ok && res.ok }) };
+		}
+	},
+
+	watchdog: {
+		call: function () {
+			return { result: watchdog() };
+		}
+	},
+
+	boot: {
+		call: function () {
+			if (!ensure_base())
+				return { result: { ok: false, error: 'nftables unavailable' } };
+
+			/* Start the clock from now: a reboot must not replay the events of a
+			 * day the router slept through. */
+			if (read_last_tick() === null)
+				write_last_tick(time());
+
+			load_cfg();
+			migrate_legacy();
+			sync_devices();
+
+			const res = rebuild();
+
+			sync_cron();
+			start_daemon();
+
+			return { result: { ok: res.ok, blocked: res.blocked, error: res.error } };
+		}
+	},
+
+	startDaemon: {
+		call: function () {
+			return { result: start_daemon() };
+		}
+	},
+
+	stopDaemon: {
+		call: function () {
+			return { result: stop_daemon() };
+		}
+	},
+
+	/* JSON dump of everything the UI edits; the view turns it into a download. */
+	backup: {
+		call: function () {
+			load_cfg();
+
+			return {
+				generated: iso_now(timezone()),
+				global: {
+					enabled: get_global('enabled', '1'),
+					auto_restore: get_global('auto_restore', '1'),
+					timezone: get_global('timezone', 'Asia/Shanghai'),
+					eval_interval: get_global('eval_interval', `${DEFAULT_EVAL_INTERVAL}`),
+					watchdog_interval: get_global('watchdog_interval', `${DEFAULT_WATCHDOG_INTERVAL}`)
+				},
+				rules: sections('rule'),
+				devices: sections('device'),
+				timerules: sections('timerule'),
+				states: sections('timerstate')
+			};
+		}
+	}
+};
+
+return { 'luci.netcontrol': methods };

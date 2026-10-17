@@ -1,0 +1,16 @@
+#!/bin/sh
+# /etc/hotplug.d/iface/99-netcontrol
+#
+# Re-check the kernel rule set after an interface event. The probe is deferred
+# two seconds for fw4 to finish its reload and detached so netifd's hotplug
+# queue is never blocked; watchdog itself is a no-op unless the live rules
+# drifted from the configuration.
+
+case "$ACTION" in
+    ifup|ifdown)
+        (
+            sleep 2
+            /bin/ubus call luci.netcontrol watchdog >/dev/null 2>&1
+        ) &
+        ;;
+esac

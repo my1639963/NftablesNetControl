@@ -1,0 +1,31 @@
+# NetControl 上网控制 - UCI 配置文件
+# 由 luci-app-netcontrol 管理
+#
+# 段类型说明:
+#   global      - 全局设置（唯一命名段）
+#   device      - 设备清单：仅登记 mac/名称/IP，不产生任何 nftables 规则
+#                 （保存时间规则或添加手动条目时会自动登记在这里，删除规则或条目都不会移除登记）
+#   timerule    - 时间规则：一条规则就是它自己的一到两个时刻
+#                 action=block 禁用 / allow 放行
+#                 time_start 时刻执行 action，time_end 时刻执行 action 的反面
+#                 不填 time_end 就只有一个时刻：到点执行 action，之后不再动作（不占区间）
+#                 引擎不比较其它规则的区间，区间交叠造成的往返翻转由配置者自己负责
+#   rule        - 手动管控条目（由 ubus luci.netcontrol manualSet 创建、manualDelete 删除）
+#                 它是"时间规则之外的一次额外执行"，执行完就不管：下一次定时事件照常按
+#                 规则自己的目标覆盖它。删除条目 = 撤销这次额外执行，状态落回时间层此刻的结果
+#   timerstate  - 状态机持有值：每台设备至多一条，state=allow|block 决定内核链
+#                 source=timer|manual|none 记录最后一次事件的来源
+#                 "删除手动条目后回到哪里"由当场重算在册的时间规则得出，不在这里留副本
+#
+# 内核链 inet netcontrol / nc_forward 始终收敛到 timerstate，因此设备失去全部规则后
+# 结果是放开，而不是阻断。
+
+config netcontrol 'global'
+	option enabled '1'
+	option auto_restore '1'
+	option watchdog_interval '3'
+	option eval_interval '60'
+	# 时区配置（SRS §6.3，默认 Asia/Shanghai，需要 zoneinfo-asia）
+	option timezone 'Asia/Shanghai'
+	# option offload_detected '0'
+	# option expected_hash ''

@@ -1,0 +1,5 @@
+# Every installed file is read by a Linux router: shell, ucode, JSON and JS all
+# stay LF, and the deploy path does not have to strip CR first.
+* text=auto eol=lf
+*.lmo binary
+*.png binary

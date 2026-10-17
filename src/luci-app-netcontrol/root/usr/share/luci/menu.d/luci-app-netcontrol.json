@@ -1,0 +1,60 @@
+{
+	"admin/services/netcontrol": {
+		"title": "Access Control",
+		"order": 50,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-netcontrol" ]
+		}
+	},
+
+	"admin/services/netcontrol/status": {
+		"title": "Status Overview",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "netcontrol/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-netcontrol" ]
+		}
+	},
+
+	"admin/services/netcontrol/devices": {
+		"title": "Device Control",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "netcontrol/devices"
+		},
+		"depends": {
+			"acl": [ "luci-app-netcontrol" ]
+		}
+	},
+
+	"admin/services/netcontrol/manual": {
+		"title": "Manual Control",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "netcontrol/manual"
+		},
+		"depends": {
+			"acl": [ "luci-app-netcontrol" ]
+		}
+	},
+
+	"admin/services/netcontrol/timerules": {
+		"title": "Time Rules",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "netcontrol/timerules"
+		},
+		"depends": {
+			"acl": [ "luci-app-netcontrol" ]
+		}
+	}
+}

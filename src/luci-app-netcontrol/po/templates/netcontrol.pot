@@ -1,0 +1,461 @@
+#. Translation template for luci-app-netcontrol.
+#. Extracted from the JS views and the menu.d titles; keep it in sync with them.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-netcontrol 1.3.0\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: en\n"
+
+msgid "%s device(s) under manual control"
+msgstr ""
+
+msgid "%s, once"
+msgstr ""
+
+msgid "A rule owns its start moment and, if one is given, its end moment: at "
+"the start it applies its own action, at the end the opposite one. Rules "
+"are never compared with each other, so overlapping windows flip back and "
+"forth exactly as configured."
+msgstr ""
+
+msgid "A time rule owns this device: the next scheduled event replaces this result."
+msgstr ""
+
+msgid "A timezone name is required, e.g. Asia/Shanghai."
+msgstr ""
+
+msgid "Access Control"
+msgstr ""
+
+msgid "Action"
+msgstr ""
+
+msgid "Add"
+msgstr ""
+
+msgid "Add a device to control manually"
+msgstr ""
+
+msgid "Added"
+msgstr ""
+
+msgid "Adding the device failed: %s"
+msgstr ""
+
+msgid "all day"
+msgstr ""
+
+msgid "All day"
+msgstr ""
+
+msgid "Allow"
+msgstr ""
+
+msgid "Allow this device"
+msgstr ""
+
+msgid "Applying the rules failed: %s"
+msgstr ""
+
+msgid "Block"
+msgstr ""
+
+msgid "Block disconnects the device at once, Allow brings it back. Either way the next scheduled event of this device replaces the result."
+msgstr ""
+
+msgid "Block this device"
+msgstr ""
+
+msgid "blocked"
+msgstr ""
+
+msgid "Blocked in kernel / expected"
+msgstr ""
+
+msgid "Cancel"
+msgstr ""
+
+msgid "consistent"
+msgstr ""
+
+msgid "Cycle"
+msgstr ""
+
+msgid "Daily"
+msgstr ""
+
+msgid "Day %d"
+msgstr ""
+
+msgid "Day values"
+msgstr ""
+
+msgid "Delete"
+msgstr ""
+
+msgid "Device Control"
+msgstr ""
+
+msgid "Device list"
+msgstr ""
+
+msgid "Device MAC"
+msgstr ""
+
+msgid "Device name"
+msgstr ""
+
+msgid "Device states"
+msgstr ""
+
+msgid "Device states held"
+msgstr ""
+
+msgid "Devices seen in the DHCP leases and the neighbour table. Adding one records it in the configuration only, without touching the kernel rule set."
+msgstr ""
+
+msgid "Discovered devices"
+msgstr ""
+
+msgid "Download the current configuration as JSON"
+msgstr ""
+
+msgid "drifted"
+msgstr ""
+
+msgid "Drop rules in chain"
+msgstr ""
+
+msgid "Each entry is one extra execution outside the clock: it applies "
+"immediately and lasts until the next scheduled event of that device. "
+"Deleting one hands the device back to its time rules right away, and a "
+"device no time rule governs stays open."
+msgstr ""
+
+msgid "Edit device"
+msgstr ""
+
+msgid "Edit time rule"
+msgstr ""
+
+msgid "End time"
+msgstr ""
+
+msgid "ends"
+msgstr ""
+
+msgid "Enforcement"
+msgstr ""
+
+msgid "Enter a valid MAC address."
+msgstr ""
+
+msgid "ERROR"
+msgstr ""
+
+msgid "Evaluated at %s"
+msgstr ""
+
+msgid "Evaluation interval (seconds)"
+msgstr ""
+
+msgid "Evaluation loop"
+msgstr ""
+
+msgid "Export backup"
+msgstr ""
+
+msgid "Fri"
+msgstr ""
+
+msgid "Give a start time, or tick All day."
+msgstr ""
+
+msgid "Global control switch"
+msgstr ""
+
+msgid "Global settings"
+msgstr ""
+
+msgid "Global switch"
+msgstr ""
+
+msgid "Hardware flow offloading is active: established flows may keep passing after a device is blocked."
+msgstr ""
+
+msgid "HH:MM, 24 hour clock."
+msgstr ""
+
+msgid "How often the time rule engine re-evaluates device states. Range 60-600, default 60."
+msgstr ""
+
+msgid "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-60, default 3."
+msgstr ""
+
+msgid "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve."
+msgstr ""
+
+msgid "In kernel"
+msgstr ""
+
+msgid "INFO"
+msgstr ""
+
+msgid "Invalid timezone format. Use an IANA name such as Asia/Shanghai."
+msgstr ""
+
+msgid "invalid window"
+msgstr ""
+
+msgid "IP"
+msgstr ""
+
+msgid "Kernel rules drifted from the expected set. Reconcile to converge them."
+msgstr ""
+
+msgid "Last event"
+msgstr ""
+
+msgid "Local time (%s)"
+msgstr ""
+
+msgid "Local time: %s"
+msgstr ""
+
+msgid "manual"
+msgstr ""
+
+msgid "Manual Control"
+msgstr ""
+
+msgid "Mon"
+msgstr ""
+
+msgid "Monthly"
+msgstr ""
+
+msgid "next"
+msgstr ""
+
+msgid "nftables rejected the rule set."
+msgstr ""
+
+msgid "No"
+msgstr ""
+
+msgid "No device has been seen yet."
+msgstr ""
+
+msgid "No device is governed by a time rule yet."
+msgstr ""
+
+msgid "No device is under manual control. Use Add above to block or release one."
+msgstr ""
+
+msgid "offline"
+msgstr ""
+
+msgid "once"
+msgstr ""
+
+msgid "online"
+msgstr ""
+
+msgid "Online state"
+msgstr ""
+
+msgid "open"
+msgstr ""
+
+msgid "Optional"
+msgstr ""
+
+msgid "Optional reference; the live address comes from the leases."
+msgstr ""
+
+msgid "Optional, used for display only."
+msgstr ""
+
+msgid "Optional. HH:MM, earlier than the start time puts the moment on the next day. Left empty the rule is a single moment: it runs its action once per cycle and then does nothing further."
+msgstr ""
+
+msgid "Pick a known device, or type the address of one that is currently off."
+msgstr ""
+
+msgid "Reconcile failed"
+msgstr ""
+
+msgid "Reconcile now"
+msgstr ""
+
+msgid "Recreate the kernel rules from the configuration when the router boots."
+msgstr ""
+
+msgid "Restore rules after reboot"
+msgstr ""
+
+msgid "Rule digest"
+msgstr ""
+
+msgid "Rule enabled"
+msgstr ""
+
+msgid "Rule name"
+msgstr ""
+
+msgid "Rules"
+msgstr ""
+
+msgid "running"
+msgstr ""
+
+msgid "Sat"
+msgstr ""
+
+msgid "Save"
+msgstr ""
+
+msgid "Source"
+msgstr ""
+
+msgid "Start time"
+msgstr ""
+
+msgid "starts"
+msgstr ""
+
+msgid "Starts at midnight, ends at the next midnight."
+msgstr ""
+
+msgid "State"
+msgstr ""
+
+msgid "State and upcoming events"
+msgstr ""
+
+msgid "Status Overview"
+msgstr ""
+
+msgid "Stop controlling this device"
+msgstr ""
+
+msgid "stopped"
+msgstr ""
+
+msgid "Sun"
+msgstr ""
+
+msgid "Switching the global control off lifts every time based rule but keeps manual blocks, which is the safe state for maintenance windows."
+msgstr ""
+
+msgid "The configured timezone has no zoneinfo data on this device, so the rules fall back to the system clock zone. Install zoneinfo-asia to use the configured zone."
+msgstr ""
+
+msgid "The conntrack utility is not installed, so flows of a newly blocked device expire on their own instead of being torn down."
+msgstr ""
+
+msgid "The device is registered in the device list as well."
+msgstr ""
+
+msgid "The devices NetControl keeps track of. A row here is a registration only: it writes no nftables rule, so the device keeps unrestricted access until a time rule governs it."
+msgstr ""
+
+msgid "The engine has not run an event yet, so no device is restricted."
+msgstr ""
+
+msgid "The evaluation loop is not running; time rules only change on cron ticks or manual reconcile."
+msgstr ""
+
+msgid "The inet netcontrol table or its forward chain is missing. Reconcile to rebuild it."
+msgstr ""
+
+msgid "The inventory NetControl keeps track of. Listing a device here writes no kernel rule: its traffic stays unrestricted until a time rule governs it."
+msgstr ""
+
+msgid "The label written to the device list. Choosing a known device fills in its hostname; type over it to rename."
+msgstr ""
+
+msgid "The nftables utility is unavailable, so no rule can be enforced."
+msgstr ""
+
+msgid "The request failed: %s"
+msgstr ""
+
+msgid "The system clock is not synchronised yet, so time rules are paused."
+msgstr ""
+
+msgid "The time must be between 00:00 and 23:59."
+msgstr ""
+
+msgid "This device is already in the list."
+msgstr ""
+
+msgid "Thu"
+msgstr ""
+
+msgid "time rule"
+msgstr ""
+
+msgid "Time rules"
+msgstr ""
+
+msgid "Time Rules"
+msgstr ""
+
+msgid "Timezone"
+msgstr ""
+
+msgid "Tue"
+msgstr ""
+
+msgid "Type a MAC address, or pick one of the devices the router already knows."
+msgstr ""
+
+msgid "unknown error"
+msgstr ""
+
+msgid "Updated"
+msgstr ""
+
+msgid "Use HH:MM, e.g. 20:00."
+msgstr ""
+
+msgid "UTC time"
+msgstr ""
+
+msgid "WARN"
+msgstr ""
+
+msgid "Watchdog interval"
+msgstr ""
+
+msgid "Watchdog interval (minutes)"
+msgstr ""
+
+msgid "Wed"
+msgstr ""
+
+msgid "Weekly"
+msgstr ""
+
+msgid "Weekly: 1 = Mon … 7 = Sun. Monthly: a day of the month; a date a month does not have simply produces no event that month."
+msgstr ""
+
+msgid "What the start time does. The end time does the opposite."
+msgstr ""
+
+msgid "When disabled, automatic time rules are lifted while explicit manual blocks are preserved."
+msgstr ""
+
+msgid "When two events of one device fall in the same minute, the ending one runs before the starting one; rules of the same kind run in the order shown here. Drag the handle to change that order."
+msgstr ""
+
+msgid "Working…"
+msgstr ""
+
+msgid "Yes"
+msgstr ""
+
