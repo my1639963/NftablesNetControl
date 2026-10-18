@@ -31,7 +31,10 @@ next speaks. The status page then names the source as changed once no enabled ru
 of that device can still produce the moment the row records in `writer` (say
 `block@22:30`). That fingerprint and never the section name is what gets compared:
 `config timerule` is anonymous, so UCI rehashes `cfgXXXXXX` from the position in the
-file and deleting one rule renames every rule behind it.
+file and deleting one rule renames every rule behind it. Hovering the changed
+label shows that moment. A stamp holds a state and a minute, never the cycle, so
+an edit to `cycle_type` or `day_values` alone leaves it explainable - the row is
+only flagged once the surviving rules can no longer produce the minute itself.
 
 ## Building
 
@@ -66,7 +69,9 @@ file and deleting one rule renames every rule behind it.
 保持到剩余规则的下一次动作。这时如果该设备已没有任何启用规则还能产出这一行记下的那个时刻
 （`timerstate` 的 `writer`，如 `block@22:30`），状态总览的来源列就把它标成「时间规则（已变更）」。
 比对用的是这个事件指纹而不是段名：`config timerule` 是匿名段，uci 每次读取都按它在文件里的位置
-重算 `cfgXXXXXX`，删掉一条会让后面所有规则集体改名、继承被删那段的旧名字。
+重算 `cfgXXXXXX`，删掉一条会让后面所有规则集体改名、继承被删那段的旧名字。把鼠标悬停在这个
+标签上就能看到那个时刻。指纹记的是状态和时刻，不记周期，所以只改 `cycle_type` 或 `day_values`
+不会让它变成无从判断——要等到剩余规则连那个时刻本身都产不出时，这一行才会标成已变更。
 
 ## 构建
 

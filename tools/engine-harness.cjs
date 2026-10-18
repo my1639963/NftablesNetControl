@@ -30,7 +30,7 @@ const NEEDED = [
 	'tz_prefix', 'local_parts', 'iso_at', 'hhmm_total', 'contains_value',
 	'cycle_matches', 'rule_target', 'flip', 'hhmm', 'event_stamp', 'rule_window',
 	'rule_moments', 'rule_stamps', 'local_midnight', 'day_range', 'bucket_of',
-	'push_bucket', 'push_day_events', 'events_in_range', 'rule_next_event'
+	'push_bucket', 'push_day_events', 'events_in_range', 'last_event', 'rule_next_event'
 ];
 
 /* A name a build of the backend may not have yet. The driver only reaches these

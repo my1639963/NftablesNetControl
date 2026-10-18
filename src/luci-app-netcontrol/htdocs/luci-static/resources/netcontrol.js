@@ -115,6 +115,24 @@ return baseclass.extend({
 		return '—';
 	},
 
+	/* The cell the source column draws. "Changed" on its own is not actionable -
+	 * the question right after it is which moment no surviving rule can produce,
+	 * and the row already records that moment as `writer`, so the hover names it
+	 * without giving the column a second line.
+	 *
+	 * `rule_section` stays out on purpose. An anonymous section name is rehashed
+	 * from the position on every read, so the one the row holds can already belong
+	 * to a different rule on disk; showing it would recreate on the display side
+	 * the exact error the fingerprint removed from the test. */
+	sourceCell(source, alive, writer) {
+		const label = this.sourceLabel(source, alive);
+
+		if (alive !== false || !writer)
+			return label;
+
+		return E('span', { 'title': `${label}: ${writer}` }, label);
+	},
+
 	/* The empty state of a hand built table, shaped like the one form.js gives a
 	 * CBI table so every page falls back the same way. */
 	placeholderRow(colspan, message) {

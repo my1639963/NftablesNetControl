@@ -578,7 +578,14 @@ function hhmm(mins) {
  * clock face it was due on. Deliberately not the section name - `config timerule`
  * is anonymous in /etc/config/netcontrol, so ucode rehashes `cfgXXXXXX` from the
  * position on every read and deleting one rule renames every rule behind it. A name
- * would be a fingerprint that a plain delete destroys. */
+ * would be a fingerprint that a plain delete destroys.
+ *
+ * A state and a minute, never the cycle that repeats them, and that limit is on
+ * purpose: editing only `cycle_type` or `day_values` leaves the same minute on the
+ * schedule, so the row stays one an enabled rule still produces and the screen
+ * goes on saying "time rule" until the device's next real moment moves the state.
+ * What such an edit cannot say is which day the surviving rule acts on - cheaper
+ * than a fingerprint no rule can answer to after any edit at all. */
 function event_stamp(target, minute) {
 	return `${target}@${hhmm(minute)}`;
 }
@@ -796,6 +803,20 @@ function events_in_range(rules, from, to, tz) {
 	return out;
 }
 
+/* The event that last spoke within a window, or null. events_in_range() files
+ * each day's moments in order, so the tail is the answer.
+ *
+ * manual_delete() reaches it under this name because it is the one write path
+ * outside tick(): a deleted manual row has to hand the device to the state the
+ * rules already produced, and the row it writes has to carry that event's
+ * fingerprint. Sharing the stream is the point - the stamp an engine-authored
+ * row lands on and the stamp the owner test looks for then cannot disagree. */
+function last_event(rules, from, to, tz) {
+	const events = events_in_range(rules, from, to, tz);
+
+	return length(events) ? events[length(events) - 1] : null;
+}
+
 /* Where the clock would leave this device right now, computed the way tick()
  * computes it: replay the events that were due since the frame opened and keep
  * the last one. Sharing events_in_range() is the whole point - a second
@@ -818,23 +839,24 @@ function current_time_target(mac) {
 	const ctx = clock_context();
 
 	if (!ctx.ok)
-		return { target: 'allow', source: 'none', section: null };
+		return { target: 'allow', source: 'none', section: null, writer: null };
 
 	const rules = filter(enabled_timerules(), function (r) {
 		return norm_mac(r.device_mac) === mac;
 	});
 
 	if (!length(rules))
-		return { target: 'allow', source: 'none', section: null };
+		return { target: 'allow', source: 'none', section: null, writer: null };
 
 	const back = ctx.epoch - RESTORE_SCAN_DAYS * 86400;
 	const from = local_midnight(ctx.tz, back) ?? back;
-	const events = events_in_range(rules, from, ctx.epoch, ctx.tz);
+	const last = last_event(rules, from, ctx.epoch, ctx.tz);
 
-	if (!length(events))
-		return { target: 'allow', source: 'none', section: null };
-
-	const last = events[length(events) - 1];
+	/* One shape for all four answers: a caller reading `restore.writer` must get
+	 * null rather than undefined just because this return did not think about the
+	 * fingerprint field. */
+	if (last === null)
+		return { target: 'allow', source: 'none', section: null, writer: null };
 
 	return { target: last.target, source: 'timer', section: last.section, writer: last.stamp };
 }
@@ -1132,22 +1154,12 @@ function plan(enabled, states) {
 
 		planned[mac] = true;
 
-		/* The same three-step answer preview_snapshot() gives, in the same order. */
-		let reason = 'global_off';
-
-		if (source === 'manual')
-			reason = 'state_from_manual';
-		else if (enabled)
-			reason = 'state_from_timer';
-
-		decisions[mac] = {
-			blocked,
-			source,
-			state: held ? 'block' : 'allow',
-			section: s.section ?? null,
-			at: s.at ?? null,
-			reason
-		};
+		/* Only `blocked` is read: status() and preview_snapshot() ask plan what the
+		 * chain should hold, and each builds its own "why" because only they can
+		 * see a device with no state row at all. A second reason ladder here would
+		 * be another spelling of one answer - and it was already the wrong one,
+		 * since a `none` row with the switch on read as state_from_timer. */
+		decisions[mac] = { blocked };
 
 		if (blocked) {
 			/* The comment has to name the rule an operator can find and edit, not
@@ -1860,8 +1872,12 @@ function managed() {
 			blocked: is_set(held[mac]),
 			action: row.action ?? 'block',
 			section: row['.name'],
-			state: st?.state ?? null,
-			source: st?.source ?? null,
+			/* Folded like every other read: a hand-typed `Timer` or `BLOCK` must not
+			 * reach one page folded and another page raw. The manual view draws
+			 * neither column today, so this costs no screen and buys the same
+			 * vocabulary. */
+			state: fold_state(st?.state),
+			source: fold_source(st?.source),
 			event_at: st?.at ?? null,
 			timed: is_set(timed[mac]),
 			created_at: row.created_at ?? null,
@@ -1937,7 +1953,11 @@ function status() {
 				owner_alive: owner_alive(s, mac, owners),
 				state: fold_state(s.state),
 				rule_section: s.section ?? null,
-				writer: s.writer ?? null,
+				/* `||` not `??`: apply_event() clears the field by writing the empty
+				 * string, and a reply that says `""` would leave the view guessing
+				 * between "no moment recorded" and a broken one. Absent and empty
+				 * are the same answer - null, which draws a plain "time rule". */
+				writer: s.writer || null,
 				at: s.at ?? null,
 				ip: (s.ip && s.ip !== 'unknown') ? s.ip : mac_to_ip(mac, arp, leases),
 				online: is_set(online[mac]),
@@ -2096,13 +2116,16 @@ function preview_snapshot(wanted) {
 			source,
 			owner_alive: st === null ? true : owner_alive(st, mac, owners),
 			section: st?.section ?? null,
-			writer: st?.writer ?? null,
+			writer: st?.writer || null,
 			at: st?.at ?? null,
 			reason,
 			rules: map(by_time[mac] ?? [], function (r) {
-				const w = rule_window(r);
+				/* "Does this rule have moments" is asked once, of rule_moments() -
+				 * the same function the stream and the owner test ask. A second
+				 * reading of the window is what AG-B1 was about. */
+				const moments = rule_moments(r);
 				const live = is_bool(r.enabled, true) && enabled;
-				const next = w.valid && live ? rule_next_event(r, ctx.tz, ctx.epoch, frame) : null;
+				const next = live && length(moments) ? rule_next_event(r, ctx.tz, ctx.epoch, frame) : null;
 
 				return {
 					section: r['.name'],
@@ -2113,7 +2136,7 @@ function preview_snapshot(wanted) {
 					start: r.time_start ?? null,
 					end: r.time_end ?? null,
 					enabled: is_bool(r.enabled, true),
-					valid: w.valid,
+					valid: length(moments) > 0,
 					next: nextEventFrame(next)
 				};
 			})

@@ -75,16 +75,17 @@ function mk(sec, action, start, end, cycle, days, allday) {
  * moment rule owns no interval, so the last event in the scan window is the
  * only answer. A daily 22:00 block with no end time has to still read as
  * blocked the next morning - an interval reader used to find nothing here and
- * hand the device back open. */
+ * hand the device back open.
+ *
+ * This asks last_event(), the same helper current_time_target() uses, so the
+ * manual-delete write path is under test rather than only the tick() one. */
 function replay_at(rules, at) {
-	const evs = events_in_range(rules, at - 31 * 86400, at, TZ);
+	const last = last_event(rules, at - 31 * 86400, at, TZ);
 
-	if (length(evs) === 0)
+	if (last === null)
 		return 'allow (no event in 31 days)';
 
-	const last = evs[length(evs) - 1];
-
-	return sprintf('%s (%s at %s, %d events)', last.target, last.kind, stamp(last.epoch), length(evs));
+	return sprintf('%s (%s at %s, stamp %s)', last.target, last.kind, stamp(last.epoch), last.stamp);
 }
 
 /* 2026-06-15 is a Monday, so Friday of the same week is the 19th. */
@@ -205,4 +206,74 @@ print(sprintf('  %d events in 31 days, %d with a stamp no rule_stamps() produced
 
 for (let s in stray)
 	print(sprintf('    %s\n', s));
+
+/* The same contract read the other way. The block above is the false-alarm half
+ * (a live rule must explain the stamp the stream wrote); this is the half that
+ * used to be only an argument: an edit that moves a moment must move the
+ * fingerprints, or the screen cannot tell that the rule changed.
+ *
+ * A stamp carries a state and a minute, not the cycle - so the cycle-only edits
+ * are asserted to leave it alone. That is AG-C5 written as a test rather than as
+ * a comment: if a later build folds the cycle into the stamp, these two lines
+ * light up and the trade-off gets made on purpose instead of by accident. */
+function sig(rule) {
+	return strjoin(rule_stamps(rule), ',');
+}
+
+function edit_of(section, field, value) {
+	const copy = merge(rule_of(CORPUS, section), {});
+
+	copy[field] = value;
+
+	return copy;
+}
+
+const MOMENT_EDITS = [
+	['b', 'time_start', '09:30'],
+	['b', 'action', 'allow'],
+	['b', 'all_day', '1'],
+	['s', 'time_end', '23:00']
+];
+
+const CYCLE_EDITS = [
+	['c', 'cycle_type', 'weekly'],
+	['w', 'day_values', ['1']]
+];
+
+print('\n== stamps react to an edit ==\n');
+
+let frozen = 0;
+let moved_cycle = 0;
+
+for (let e in MOMENT_EDITS) {
+	const before = sig(rule_of(CORPUS, e[0]));
+	const after = sig(edit_of(e[0], e[1], e[2]));
+
+	if (before === after)
+		frozen++;
+
+	print(sprintf('  %s %s -> %s: %s => %s moved=%s (EXPECT yes)\n',
+		e[0], e[1], e[2], before, after, before === after ? 'no' : 'yes'));
+}
+
+for (let e in CYCLE_EDITS) {
+	const before = sig(rule_of(CORPUS, e[0]));
+	const after = sig(edit_of(e[0], e[1], e[2]));
+
+	if (before !== after)
+		moved_cycle++;
+
+	print(sprintf('  %s %s -> %s: %s => %s moved=%s (EXPECT no, the stamp is cycle-blind)\n',
+		e[0], e[1], e[2], before, after, before !== after ? 'yes' : 'no'));
+}
+
+print(sprintf('  %d moment edits frozen, %d cycle edits that moved a stamp (EXPECT 0 and 0)\n',
+	frozen, moved_cycle));
+
+/* `%02d` and the floor-by-|0 are ucode behaviour, not ours, and the fingerprint
+ * is built out of them. Read this line before any ucode upgrade on a router: a
+ * stamp that prints as `0:59` or `24:59` silently changes what a state row
+ * claims, and the owner test then calls every live rule changed. */
+print('\n== hhmm() clock face ==\n');
+print(sprintf('  %s %s %s (EXPECT 00:00 00:59 23:59)\n', hhmm(0), hhmm(59), hhmm(1439)));
 

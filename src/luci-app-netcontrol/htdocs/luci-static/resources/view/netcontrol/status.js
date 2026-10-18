@@ -245,7 +245,7 @@ return view.extend({
 						E('td', { 'class': 'td cbi-value-field' }, d.name || '—'),
 						E('td', { 'class': 'td cbi-value-field' }, d.ip || '—'),
 						E('td', { 'class': 'td cbi-value-field' }, netcontrol.stateSpan(d.state === 'block')),
-						E('td', { 'class': 'td cbi-value-field' }, netcontrol.sourceLabel(d.source, d.owner_alive)),
+						E('td', { 'class': 'td cbi-value-field' }, netcontrol.sourceCell(d.source, d.owner_alive, d.writer)),
 						E('td', { 'class': 'td cbi-value-field' }, d.at || '—'),
 						/* This column is headed as the kernel, so it reads the kernel: the plan
 						 * value one row to the left would keep saying "yes" through a drift the
