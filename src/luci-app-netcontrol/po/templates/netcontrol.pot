@@ -202,7 +202,19 @@ msgstr ""
 msgid "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve."
 msgstr ""
 
+msgid "Import"
+msgstr ""
+
+msgid "Import a backup"
+msgstr ""
+
+msgid "Import backup"
+msgstr ""
+
 msgid "In kernel"
+msgstr ""
+
+msgid "In the backup"
 msgstr ""
 
 msgid "INFO"
@@ -217,7 +229,7 @@ msgstr ""
 msgid "IP"
 msgstr ""
 
-msgid "Kernel rules drifted from the expected set. Reconcile to converge them."
+msgid "Kernel rules drifted from the expected set. Sync to converge them."
 msgstr ""
 
 msgid "Last event"
@@ -233,6 +245,9 @@ msgid "manual"
 msgstr ""
 
 msgid "Manual Control"
+msgstr ""
+
+msgid "Manual entries"
 msgstr ""
 
 msgid "Mon"
@@ -260,6 +275,9 @@ msgid "No device is governed by a time rule yet."
 msgstr ""
 
 msgid "No device is under manual control. Use Add above to block or release one."
+msgstr ""
+
+msgid "Now on the router"
 msgstr ""
 
 msgid "offline"
@@ -292,10 +310,16 @@ msgstr ""
 msgid "Pick a known device, or type the address of one that is currently off."
 msgstr ""
 
-msgid "Reconcile failed"
+msgid "Pick the backup file to import. Its contents replace the whole saved "
+"configuration - time rules, manual entries and the device list - after "
+"the configuration now on the router is archived. Device states are never "
+"imported: the engine recomputes them."
 msgstr ""
 
-msgid "Reconcile now"
+msgid "Rebuild the kernel chain from the saved configuration, whether or not it looks different"
+msgstr ""
+
+msgid "Replace the saved configuration with a backup file"
 msgstr ""
 
 msgid "Rule enabled"
@@ -314,6 +338,9 @@ msgid "Sat"
 msgstr ""
 
 msgid "Save"
+msgstr ""
+
+msgid "Section"
 msgstr ""
 
 msgid "Source"
@@ -349,6 +376,12 @@ msgstr ""
 msgid "Switching the global control off lifts every time based rule but keeps manual blocks, which is the safe state for maintenance windows."
 msgstr ""
 
+msgid "Sync failed"
+msgstr ""
+
+msgid "Sync now"
+msgstr ""
+
 msgid "The configured timezone has no zoneinfo data on this device, so the rules fall back to the system clock zone. Install zoneinfo-asia to use the configured zone."
 msgstr ""
 
@@ -367,7 +400,13 @@ msgstr ""
 msgid "The evaluation loop is not running; the watchdog starts it again on its next round, and until then time rules change only on the backstop tick."
 msgstr ""
 
-msgid "The inet netcontrol table or its forward chain is missing. Reconcile to rebuild it."
+msgid "The file could not be read."
+msgstr ""
+
+msgid "The file is larger than %d KB, so it cannot be a backup written by this page."
+msgstr ""
+
+msgid "The inet netcontrol table or its forward chain is missing. Sync to rebuild it."
 msgstr ""
 
 msgid "The inventory NetControl keeps track of. Listing a device here writes no kernel rule: its traffic stays unrestricted until a time rule governs it."
@@ -386,6 +425,9 @@ msgid "The time must be between 00:00 and 23:59."
 msgstr ""
 
 msgid "This device is already in the list."
+msgstr ""
+
+msgid "This file does not read as a backup: it is not one JSON object."
 msgstr ""
 
 msgid "Thu"

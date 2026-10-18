@@ -22,10 +22,13 @@ const callStatus = rpc.declare({
 	expect: {}
 });
 
+/* `force` is the only argument apply() takes and only this page's button sends
+ * it; the form pages' save chains call the same method with no argument, which
+ * is what keeps a device-name edit from rewriting the kernel chain. */
 const callApply = rpc.declare({
 	object: 'luci.netcontrol',
 	method: 'apply',
-	params: [],
+	params: ['force'],
 	expect: { result: {} }
 });
 
@@ -35,6 +38,19 @@ const callBackup = rpc.declare({
 	params: [],
 	expect: {}
 });
+
+const callRestore = rpc.declare({
+	object: 'luci.netcontrol',
+	method: 'restore',
+	params: ['json'],
+	expect: { result: {} }
+});
+
+/* The most a browser may hand to one restore() call. A backup this page writes
+ * cannot approach it - the backend refuses more than 200 sections of a class -
+ * so a file over the limit is not a truncated backup but the wrong file, and
+ * reading it into a request would produce a call the router never answers. */
+const MAX_IMPORT_BYTES = 524288;
 
 return view.extend({
 	rootNode: null,
@@ -64,14 +80,21 @@ return view.extend({
 		const toolbar = E('div', { 'class': 'cbi-page-actions' }, [
 			E('button', {
 				'class': 'btn cbi-button cbi-button-apply',
-				'click': ui.createHandlerFn(this, 'handleReconcile')
-			}, [_('Reconcile now')]),
+				'title': _('Rebuild the kernel chain from the saved configuration, whether or not it looks different'),
+				'click': ui.createHandlerFn(this, 'handleSync')
+			}, [_('Sync now')]),
 			' ',
 			E('button', {
 				'class': 'btn cbi-button cbi-button-action',
 				'title': _('Download the current configuration as JSON'),
 				'click': ui.createHandlerFn(this, 'handleBackup')
-			}, [_('Export backup')])
+			}, [_('Export backup')]),
+			' ',
+			E('button', {
+				'class': 'btn cbi-button cbi-button-action',
+				'title': _('Replace the saved configuration with a backup file'),
+				'click': ui.createHandlerFn(this, 'handleImport')
+			}, [_('Import backup')])
 		]);
 
 		if (!this.capabilities.conntrack)
@@ -131,12 +154,12 @@ return view.extend({
 		});
 	},
 
-	handleReconcile(ev) {
-		return callApply().then(L.bind(function (res) {
+	handleSync(ev) {
+		return callApply('1').then(L.bind(function (res) {
 			/* Only a failure gets a banner; on success the refreshed page shows the
 			 * consistency badge moving to consistent. */
 			if (res && res.ok === false)
-				ui.addNotification(_('Reconcile failed'),
+				ui.addNotification(_('Sync failed'),
 					E('p', {}, res.error || _('nftables rejected the rule set.')), 'error');
 
 			return this.pollStatus();
@@ -154,6 +177,150 @@ return view.extend({
 			a.remove();
 			URL.revokeObjectURL(url);
 		});
+	},
+
+	/* restore() takes the file as one string and answers either "all of it is
+	 * written" or "nothing was", so every judgement the operator can make has to
+	 * be made before the click: what the file holds, next to what the router
+	 * holds now. The live column comes from backup() - the same read the export
+	 * button uses - taken before the dialog opens so both columns appear
+	 * together instead of one arriving after the file was already chosen. */
+	handleImport(ev) {
+		return L.resolveDefault(callBackup(), {}).then(L.bind(function (live) {
+			this.openImportDialog(live || {});
+		}, this));
+	},
+
+	openImportDialog(live) {
+		const self = this;
+		const input = E('input', { type: 'file', accept: '.json,application/json' });
+		const intro = E('div', { 'class': 'cbi-section-descr' },
+			_('Pick the backup file to import. Its contents replace the whole saved configuration - time rules, manual entries and the device list - after the configuration now on the router is archived. Device states are never imported: the engine recomputes them.'));
+		const table = E('table', { 'class': 'table cbi-section-table' });
+		const errorNode = E('div', { 'class': 'nc-error-text' });
+		const confirm = E('button', { 'class': 'cbi-button cbi-button-positive', 'disabled': 'disabled' }, [_('Import')]);
+
+		let payload = null;
+
+		function setErrors(lines) {
+			dom.content(errorNode, lines.length
+				? E('ul', {}, lines.map(function (line) { return E('li', {}, line); }))
+				: '');
+		}
+
+		function listOf(node) {
+			return Array.isArray(node) ? node : [];
+		}
+
+		function compare(data) {
+			dom.content(table, [
+				E('tr', { 'class': 'tr cbi-section-table-titles' }, [
+					E('th', { 'class': 'th cbi-section-table-cell' }, _('Section')),
+					E('th', { 'class': 'th cbi-section-table-cell' }, _('In the backup')),
+					E('th', { 'class': 'th cbi-section-table-cell' }, _('Now on the router'))
+				]),
+				...[[_('Time rules'), listOf(data.timerules), listOf(live.timerules)],
+					[_('Manual entries'), listOf(data.rules), listOf(live.rules)],
+					[_('Device list'), listOf(data.devices), listOf(live.devices)]].map(function (row) {
+						return E('tr', { 'class': 'tr cbi-section-table-row' }, [
+							E('td', { 'class': 'td cbi-value-field' }, row[0]),
+							E('td', { 'class': 'td cbi-value-field' }, '%d'.format(row[1].length)),
+							E('td', { 'class': 'td cbi-value-field' }, '%d'.format(row[2].length))
+						]);
+					})
+			]);
+		}
+
+		input.addEventListener('change', function () {
+			const file = input.files[0];
+
+			setErrors([]);
+			dom.content(table, '');
+			payload = null;
+			confirm.disabled = true;
+
+			if (!file)
+				return;
+
+			if (file.size > MAX_IMPORT_BYTES) {
+				setErrors([_('The file is larger than %d KB, so it cannot be a backup written by this page.').format(MAX_IMPORT_BYTES / 1024)]);
+				return;
+			}
+
+			file.text().then(function (text) {
+				let data = null;
+
+				try {
+					data = JSON.parse(text);
+				} catch (err) {
+					data = null;
+				}
+
+				if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+					setErrors([_('This file does not read as a backup: it is not one JSON object.')]);
+					return;
+				}
+
+				/* The text is sent as it was read, not re-serialised: what the router
+				 * validates is then exactly what the operator exported. */
+				payload = text;
+				compare(data);
+				confirm.disabled = false;
+			}, function () {
+				setErrors([_('The file could not be read.')]);
+			});
+		});
+
+		confirm.addEventListener('click', function (ev) {
+			ev.preventDefault();
+
+			if (payload === null)
+				return;
+
+			const sent = payload;
+
+			confirm.disabled = true;
+			dom.content(confirm, _('Working…'));
+			setErrors([]);
+
+			return L.resolveDefault(callRestore(sent), {}).then(function (res) {
+				/* Success needs no banner: the dialog closes and the refreshed page
+				 * below it is the confirmation. */
+				if (res && res.ok) {
+					ui.hideModal();
+					return self.pollStatus();
+				}
+
+				/* The validator's list stays inside the dialog: the file the operator
+				 * is holding is still the file that failed, and the row telling them
+				 * which field is wrong is worth more than a notification they have to
+				 * read off the screen before they can fix it. */
+				dom.content(confirm, _('Import'));
+				confirm.disabled = false;
+
+				setErrors(res && Array.isArray(res.errors) && res.errors.length
+					? res.errors
+					: [_('The request failed: %s').format((res && res.error) || _('unknown error'))]);
+			});
+		});
+
+		ui.showModal(_('Import a backup'), [
+			intro,
+			table,
+			input,
+			errorNode,
+			netcontrol.footerRow([
+				E('button', {
+					'class': 'cbi-button',
+					'click': function (ev) {
+						ev.preventDefault();
+						ui.hideModal();
+					}
+				}, [_('Cancel')]),
+				' ',
+				confirm
+			])
+		], 'cbi-modal');
 	},
 
 	levelLabel(kind) {
@@ -174,7 +341,7 @@ return view.extend({
 			out.push(['error', _('The nftables utility is unavailable, so no rule can be enforced.')]);
 
 		if (!st.table_exists || !st.chain_exists)
-			out.push(['error', _('The inet netcontrol table or its forward chain is missing. Reconcile to rebuild it.')]);
+			out.push(['error', _('The inet netcontrol table or its forward chain is missing. Sync to rebuild it.')]);
 
 		if (!st.clock_ok)
 			out.push(['warn', _('The system clock is not synchronised yet, so time rules are paused.')]);
@@ -183,7 +350,7 @@ return view.extend({
 			out.push(['warn', _('The configured timezone has no zoneinfo data on this device, so the rules fall back to the system clock zone. Install zoneinfo-asia to use the configured zone.')]);
 
 		if (st.consistent === false)
-			out.push(['warn', _('Kernel rules drifted from the expected set. Reconcile to converge them.')]);
+			out.push(['warn', _('Kernel rules drifted from the expected set. Sync to converge them.')]);
 
 		if (st.offload_detected)
 			out.push(['warn', _('Hardware flow offloading is active: established flows may keep passing after a device is blocked.')]);

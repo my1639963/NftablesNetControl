@@ -203,8 +203,20 @@ msgstr "看门狗比对内核规则与应有集合并修复偏差、并在评估
 msgid "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve."
 msgstr "评估所有时间规则使用的 IANA 时区名称，例如 Asia/Shanghai。需安装 zoneinfo-asia 软件包才能解析。"
 
+msgid "Import"
+msgstr "导入"
+
+msgid "Import a backup"
+msgstr "导入备份文件"
+
+msgid "Import backup"
+msgstr "导入备份"
+
 msgid "In kernel"
 msgstr "内核中生效"
+
+msgid "In the backup"
+msgstr "备份中"
 
 msgid "INFO"
 msgstr "提示"
@@ -218,8 +230,8 @@ msgstr "时间窗无效"
 msgid "IP"
 msgstr "IP"
 
-msgid "Kernel rules drifted from the expected set. Reconcile to converge them."
-msgstr "内核规则与预期集合不一致。请点击“立即核对”使其收敛。"
+msgid "Kernel rules drifted from the expected set. Sync to converge them."
+msgstr "内核规则与预期集合不一致。请点击“立即同步”使其收敛。"
 
 msgid "Last event"
 msgstr "最近事件"
@@ -235,6 +247,9 @@ msgstr "手动"
 
 msgid "Manual Control"
 msgstr "手动管控"
+
+msgid "Manual entries"
+msgstr "手动条目"
 
 msgid "Mon"
 msgstr "周一"
@@ -262,6 +277,9 @@ msgstr "还没有设备被时间规则管控。"
 
 msgid "No device is under manual control. Use Add above to block or release one."
 msgstr "当前没有手动管控的设备。点击上方“添加”来限制或放行设备。"
+
+msgid "Now on the router"
+msgstr "当前路由器上"
 
 msgid "offline"
 msgstr "离线"
@@ -293,11 +311,17 @@ msgstr "可选。HH:MM。早于开始时间表示该时刻落在次日。留空�
 msgid "Pick a known device, or type the address of one that is currently off."
 msgstr "选择已知设备，或手动输入一台当前已断电设备的地址。"
 
-msgid "Reconcile failed"
-msgstr "核对失败"
+msgid "Pick the backup file to import. Its contents replace the whole saved "
+"configuration - time rules, manual entries and the device list - after "
+"the configuration now on the router is archived. Device states are never "
+"imported: the engine recomputes them."
+msgstr "选择要导入的备份文件。本页会先把路由器当前的配置存档，再用文件内容整份替换已保存的配置——时间规则、手动条目和设备清单。设备状态永不导入，由引擎重新计算。"
 
-msgid "Reconcile now"
-msgstr "立即核对"
+msgid "Rebuild the kernel chain from the saved configuration, whether or not it looks different"
+msgstr "按已保存的配置强制重建内核链，不论它当前看起来是否一致"
+
+msgid "Replace the saved configuration with a backup file"
+msgstr "用备份文件整份替换已保存的配置"
 
 msgid "Rule enabled"
 msgstr "规则已启用"
@@ -316,6 +340,9 @@ msgstr "周六"
 
 msgid "Save"
 msgstr "保存"
+
+msgid "Section"
+msgstr "类别"
 
 msgid "Source"
 msgstr "来源"
@@ -350,6 +377,12 @@ msgstr "周日"
 msgid "Switching the global control off lifts every time based rule but keeps manual blocks, which is the safe state for maintenance windows."
 msgstr "关闭全局管控会解除所有基于时间的规则，但保留手动阻断，这是维护窗口期的安全状态。"
 
+msgid "Sync failed"
+msgstr "同步失败"
+
+msgid "Sync now"
+msgstr "立即同步"
+
 msgid "The configured timezone has no zoneinfo data on this device, so the rules fall back to the system clock zone. Install zoneinfo-asia to use the configured zone."
 msgstr "当前配置的时区在本设备上没有 zoneinfo 数据，规则将退回使用系统时钟时区。请安装 zoneinfo-asia 以使用配置的时区。"
 
@@ -368,8 +401,14 @@ msgstr "引擎尚未执行过任何事件，因此没有设备被限制。"
 msgid "The evaluation loop is not running; the watchdog starts it again on its next round, and until then time rules change only on the backstop tick."
 msgstr "评估循环未运行；看门狗会在下一轮把它重新启动，在此之前时间规则只按兜底心跳变化。"
 
-msgid "The inet netcontrol table or its forward chain is missing. Reconcile to rebuild it."
-msgstr "inet netcontrol 表或其 forward 链缺失。请点击“立即核对”重建。"
+msgid "The file could not be read."
+msgstr "文件读取失败。"
+
+msgid "The file is larger than %d KB, so it cannot be a backup written by this page."
+msgstr "文件超过 %d KB，不可能是本页导出的备份。"
+
+msgid "The inet netcontrol table or its forward chain is missing. Sync to rebuild it."
+msgstr "inet netcontrol 表或其 forward 链缺失。请点击“立即同步”重建。"
 
 msgid "The inventory NetControl keeps track of. Listing a device here writes no kernel rule: its traffic stays unrestricted until a time rule governs it."
 msgstr "NetControl 维护的设备清单。把设备列入清单不会写入任何内核规则：在被时间规则纳管之前，其流量始终不受限。"
@@ -388,6 +427,9 @@ msgstr "时间必须在 00:00 至 23:59 之间。"
 
 msgid "This device is already in the list."
 msgstr "该设备已在清单中。"
+
+msgid "This file does not read as a backup: it is not one JSON object."
+msgstr "这个文件不是备份：它不是单个 JSON 对象。"
 
 msgid "Thu"
 msgstr "周四"

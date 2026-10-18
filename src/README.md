@@ -36,6 +36,24 @@ label shows that moment. A stamp holds a state and a minute, never the cycle, so
 an edit to `cycle_type` or `day_values` alone leaves it explainable - the row is
 only flagged once the surviving rules can no longer produce the minute itself.
 
+That authority is not readable off the chain, so the status page carries two entries
+for it. **Sync now** rebuilds the chain from the saved configuration without asking
+whether it already matches: the tick and every form save compare a fingerprint first
+and write nothing when it matches, so a chain edited with `nft` behind the app's back
+only comes back once something real changes. The forced path skips that comparison and
+sweeps conntrack for every blocked device rather than only the newly added ones - the
+case the button exists for is a device holding a rule and still talking on a flow the
+kernel has not forgotten. syslog marks it `reconciled: N device(s) blocked (forced)`,
+and no other caller passes the flag.
+
+**Export backup** writes the saved document as JSON, **Import backup** replaces the
+whole document with a file. The file is checked field by field before a single option
+is written, so an import takes effect in full or leaves the configuration exactly as it
+was, and the configuration it replaced stays at `/tmp/netcontrol-restore-prev.config`.
+`timerstate` rows are never read from the file - the engine owns them - but a manual
+row the file carries is applied the moment the import lands, exactly like one typed
+into the page, while a time rule still waits for its own next event.
+
 ## Building
 
 `make package/luci-app-netcontrol/{compile}` from an OpenWrt buildroot, or see
@@ -72,6 +90,19 @@ only flagged once the surviving rules can no longer produce the minute itself.
 重算 `cfgXXXXXX`，删掉一条会让后面所有规则集体改名、继承被删那段的旧名字。把鼠标悬停在这个
 标签上就能看到那个时刻。指纹记的是状态和时刻，不记周期，所以只改 `cycle_type` 或 `day_values`
 不会让它变成无从判断——要等到剩余规则连那个时刻本身都产不出时，这一行才会标成已变更。
+
+这份权威在链上看不出来，所以状态总览给了两个入口。**立即同步**不问链此刻是否已经一致，
+直接按已保存的配置重建：定时循环和每一次表单保存都先比对指纹，一致就一个字都不写，所以在
+外部用 `nft` 改过的链，要等到一次真正的改动才会被纠回来。强制这条路径跳过比对，并且对每台
+被阻断的设备清理 conntrack，而不只清理新加入的那些——这个按钮要解决的局面正是：规则已经在
+链上，设备却还靠一条内核没有忘记的既有连接继续上网。syslog 里它记作
+`reconciled: N device(s) blocked (forced)`，除了这个按钮没有别的调用方会传这个标记。
+
+**导出备份**把已保存的配置写成 JSON，**导入备份**用一份文件整份替换已保存的配置。文件在
+写下任何一个 option 之前先逐字段校验，于是一次导入要么整体生效、要么原封不动，被替换掉的那
+份留在 `/tmp/netcontrol-restore-prev.config`。文件里的 `timerstate` 行永不读取——这些状态归
+引擎所有；但文件里的手动管控条目落盘当场就下发，和在页面上添加一条完全一样，时间规则照常等
+它自己的下一个时刻。
 
 ## 构建
 

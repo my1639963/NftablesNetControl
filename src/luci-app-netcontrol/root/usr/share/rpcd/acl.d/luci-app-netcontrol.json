@@ -9,7 +9,7 @@
 		},
 		"write": {
 			"ubus": {
-				"luci.netcontrol": [ "apply", "manualSet", "manualDelete", "backup" ],
+				"luci.netcontrol": [ "apply", "manualSet", "manualDelete", "backup", "restore" ],
 				"uci": [ "add", "set", "delete", "order", "commit", "apply" ]
 			},
 			"uci": [ "netcontrol" ]

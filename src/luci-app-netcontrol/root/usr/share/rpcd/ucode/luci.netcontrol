@@ -1173,12 +1173,23 @@ function plan(enabled, states) {
 	return { blocks, decisions };
 }
 
-/* Converge the kernel chain onto the state machine. */
-function rebuild() {
+/* Converge the kernel chain onto the state machine.
+ *
+ * `force` is the toolbar's promise - "the chain is the configuration now" - so
+ * it skips the comparison below and sweeps conntrack for every blocked device
+ * instead of only the newly added ones. That is the case the button exists for:
+ * a device holding a rule and still talking, which is an established flow the
+ * kernel has not forgotten. No other caller passes it. A tick or a form save
+ * that rewrote a matching chain would spend the same transaction on every
+ * device on the network, and tearing down flows nobody asked about is not a
+ * side effect to hand out for free. */
+function rebuild(force) {
 	load_cfg();
 
+	const forced = is_bool(force, false);
+
 	if (!ensure_base())
-		return { ok: false, error: 'nftables unavailable', blocks: [] };
+		return { ok: false, error: 'nftables unavailable', blocks: [], rewritten: false };
 
 	const wanted = plan(global_enabled(), sections('timerstate'));
 	const current = chain_rules();
@@ -1189,8 +1200,8 @@ function rebuild() {
 	 * per blocked device. An unchanged kernel state is now answered without
 	 * touching netfilter, which also means the transaction below only ever
 	 * carries a real change - so it is worth a log line every time. */
-	if (same_fingerprint(kernel_fingerprint(current), plan_fingerprint(wanted.blocks)))
-		return { ok: true, blocked: length(wanted.blocks), blocks: wanted.blocks, decisions: wanted.decisions };
+	if (!forced && same_fingerprint(kernel_fingerprint(current), plan_fingerprint(wanted.blocks)))
+		return { ok: true, rewritten: false, blocked: length(wanted.blocks), blocks: wanted.blocks, decisions: wanted.decisions };
 
 	const before = {};
 
@@ -1199,12 +1210,13 @@ function rebuild() {
 
 	if (!nft_apply(batch_lines(wanted.blocks))) {
 		log('err', 'atomic rebuild failed');
-		return { ok: false, error: 'nft apply failed', blocks: wanted.blocks };
+		return { ok: false, error: 'nft apply failed', blocks: wanted.blocks, rewritten: false };
 	}
 
 	/* Established flows keep a freshly blocked device talking until conntrack
 	 * forgets them, so tear them down as soon as the drop rules are in. */
-	const fresh = filter(wanted.blocks, function (b) { return !is_set(before[b.mac]); });
+	const fresh = forced ? wanted.blocks
+		: filter(wanted.blocks, function (b) { return !is_set(before[b.mac]); });
 
 	if (length(fresh)) {
 		const arp = arp_table();
@@ -1214,9 +1226,13 @@ function rebuild() {
 			clean_conntrack(b.ip ?? mac_to_ip(b.mac, arp, leases));
 	}
 
-	log('info', `reconciled: ${length(wanted.blocks)} device(s) blocked`);
+	/* `forced` is what tells the two apart in syslog: the same count with the
+	 * same words could be a tick that found drift or an operator who asked for
+	 * a transaction while nothing had drifted, and only the second one proves
+	 * the button does what its label says. */
+	log('info', `reconciled: ${length(wanted.blocks)} device(s) blocked${forced ? ' (forced)' : ''}`);
 
-	return { ok: true, blocked: length(wanted.blocks), blocks: wanted.blocks, decisions: wanted.decisions };
+	return { ok: true, rewritten: true, blocked: length(wanted.blocks), blocks: wanted.blocks, decisions: wanted.decisions };
 }
 
 /* ── manual control ───────────────────────────────────── */
@@ -1312,8 +1328,11 @@ function owner_alive(s, mac, owners) {
  *
  * A device that still has an enabled rule is deliberately skipped - its next
  * moment belongs to the event stream, and a second evaluator here is how the
- * two answers drift apart. Rows whose source is already manual are the
- * operator's own words and stay untouched.
+ * two answers drift apart. A row whose source is already manual stays untouched
+ * while the manual row that says those words is still on file; an overwrite
+ * import can delete the row and leave its mirror behind, and a manual state with
+ * no row is a claim nothing wrote - the one kind of orphan that keeps a device
+ * in the kernel, because plan() reads states rather than rows.
  *
  * Skipping is not forgetting. When the moment a state row records is no longer one
  * the device's rules can produce but others are left, the state holds until a
@@ -1335,12 +1354,16 @@ function reconcile_ruleless_states() {
 	for (let s in sections('timerstate')) {
 		const mac = norm_mac(s.mac);
 
-		if (mac === null || fold_source(s.source) === 'manual' || is_set(seen[mac]) || is_set(timed[mac]))
+		if (mac === null || is_set(seen[mac]) || is_set(timed[mac]))
+			continue;
+
+		const row = manual_row(mac);
+
+		if (row !== null && fold_source(s.source) === 'manual')
 			continue;
 
 		seen[mac] = true;
 
-		const row = manual_row(mac);
 		const section = row === null ? null : row['.name'];
 		const target = row === null ? 'allow' : (row.action === 'allow' ? 'allow' : 'block');
 		const source = row === null ? 'none' : 'manual';
@@ -2146,6 +2169,547 @@ function preview_snapshot(wanted) {
 	return { devices: out, local_time: iso_now(ctx.tz), timezone: timezone_value() };
 }
 
+/* ── import ───────────────────────────────────────────── */
+
+/* A backup is text from outside this object, so the whole document has to be
+ * right before a single option is written: half an import would converge the
+ * kernel onto rules nobody meant, and there is no way to take back the half
+ * that already reached the file. Every checker below names the field and what
+ * it expected, because the operator reading the dialog has to find the line to
+ * fix, not guess which one this is. */
+const CONFIG_FILE = '/etc/config/netcontrol';
+const RESTORE_ARCHIVE = '/tmp/netcontrol-restore-prev.config';
+const MAX_RESTORE_SECTIONS = 200;
+
+/* Written by the same form that reads them back, so these are the only spellings
+ * that can come out of this application; accepting a few common ones costs
+ * nothing and keeps a hand-edited file from being refused over `yes`. */
+const FLAG_WORDS = { '1': '1', 'yes': '1', 'on': '1', 'true': '1', '0': '0', 'no': '0', 'off': '0', 'false': '0' };
+const RULE_ACTIONS = ['block', 'allow'];
+const CYCLE_TYPES = ['daily', 'weekly', 'monthly'];
+
+function describe_value(value) {
+	if (!is_set(value))
+		return 'nothing';
+
+	switch (type(value)) {
+		case 'array':
+			return 'a list';
+
+		case 'object':
+			return 'an object';
+
+		case 'function':
+			return 'a function';
+	}
+
+	return `"${value}"`;
+}
+
+/* A UCI option holds one string, so a document that puts a list or an object
+ * where the engine expects a label is not a backup of this configuration. The
+ * scalar spellings are the ones this interpreter gives back - it has no `number`
+ * and no `boolean`, so a file with a bare 7 or a true in a field has to match on
+ * `int`, `float` and `bool` or a value the operator typed would be refused for
+ * the shape of the word rather than the value itself. */
+function text_value(value) {
+	if (!is_set(value))
+		return null;
+
+	switch (type(value)) {
+		case 'string':
+		case 'int':
+		case 'float':
+		case 'bool':
+			return `${value}`;
+	}
+
+	return null;
+}
+
+/* Absent writes nothing: the engine has documented defaults, and filling them in
+ * here would make the configuration claim the operator chose values the file
+ * never stated. */
+function copy_text(where, source, field, out, errors) {
+	if (!is_set(source[field]))
+		return;
+
+	const value = text_value(source[field]);
+
+	if (value === null)
+		push(errors, `${where}.${field}: one line of text, found ${describe_value(source[field])}`);
+	else if (trim(value) !== '')
+		out[field] = trim(value);
+}
+
+function copy_flag(where, source, field, out, errors) {
+	if (!is_set(source[field]))
+		return;
+
+	const folded = FLAG_WORDS[lc(trim(`${text_value(source[field]) ?? ''}`))];
+
+	if (is_set(folded))
+		out[field] = folded;
+	else
+		push(errors, `${where}.${field}: 0 or 1, found ${describe_value(source[field])}`);
+}
+
+function contains(list, needle) {
+	for (let item in list)
+		if (item === needle)
+			return true;
+
+	return false;
+}
+
+function copy_choice(where, source, field, out, errors, allowed) {
+	if (!is_set(source[field]))
+		return;
+
+	const value = lc(trim(`${text_value(source[field]) ?? ''}`));
+
+	if (contains(allowed, value))
+		out[field] = value;
+	else
+		push(errors, `${where}.${field}: ${strjoin(allowed, ' or ')}, found ${describe_value(source[field])}`);
+}
+
+/* Stored as the clock face the engine prints, so `9:30` and `09:30` become one
+ * thing on the page and in the rule list. */
+function copy_moment(where, source, field, out, errors) {
+	if (!is_set(source[field]))
+		return;
+
+	const total = hhmm_total(text_value(source[field]));
+
+	if (total === null)
+		push(errors, `${where}.${field}: a moment like 22:30, found ${describe_value(source[field])}`);
+	else
+		out[field] = hhmm(total);
+}
+
+/* The days a weekly or monthly rule repeats on. `daily` owns no days at all, and
+ * a rule that carries a list the cycle cannot use would be evaluated by the
+ * engine as though the extra days did not exist - a silent difference between
+ * what the file says and what the clock does. */
+function copy_days(where, source, out, errors) {
+	if (!is_set(source.day_values))
+		return;
+
+	const raw = type(source.day_values) === 'array' ? source.day_values : [source.day_values];
+	const cycle = out.cycle_type ?? 'daily';
+	const high = cycle === 'weekly' ? 7 : (cycle === 'monthly' ? 31 : 0);
+	const days = [];
+	let bad = 0;
+
+	for (let item in raw) {
+		const text = text_value(item);
+		const day = text === null ? null : to_int(text, null);
+
+		if (day === null || day < 1 || (high > 0 && day > high)) {
+			push(errors, `${where}.day_values: a day between 1 and ${high}, found ${describe_value(item)}`);
+			bad++;
+		} else if (!contains(days, day)) {
+			push(days, day);
+		}
+	}
+
+	if (bad > 0)
+		return;
+
+	if (high === 0)
+		push(errors, `${where}.day_values: no days on a daily rule, found ${length(days)} value(s)`);
+	else if (length(days) > 0)
+		out.day_values = map(days, function (d) { return `${d}`; });
+}
+
+/* An ip the engine can look at: the address itself, or the word it writes when
+ * it has seen the device but not the lease. */
+function copy_ip(where, source, out, errors) {
+	if (!is_set(source.ip))
+		return;
+
+	const value = trim(`${text_value(source.ip) ?? ''}`);
+
+	if (value === 'unknown')
+		out.ip = value;
+	else if (is_ipv4(value))
+		out.ip = value;
+	else
+		push(errors, `${where}.ip: an IPv4 address, found ${describe_value(source.ip)}`);
+}
+
+function normalize_timerule(where, rule, errors) {
+	const out = {};
+
+	if (type(rule) !== 'object') {
+		push(errors, `${where}: a time rule object, found ${describe_value(rule)}`);
+		return null;
+	}
+
+	const mark = length(errors);
+	const mac = norm_mac(rule.device_mac);
+
+	if (mac === null)
+		push(errors, `${where}.device_mac: a MAC address like aa:bb:cc:dd:ee:ff, found ${describe_value(rule.device_mac)}`);
+	else
+		out.device_mac = mac;
+
+	copy_text(where, rule, 'name', out, errors);
+	copy_text(where, rule, 'device_name', out, errors);
+	copy_choice(where, rule, 'action', out, errors, RULE_ACTIONS);
+	copy_choice(where, rule, 'cycle_type', out, errors, CYCLE_TYPES);
+	copy_flag(where, rule, 'enabled', out, errors);
+	copy_flag(where, rule, 'all_day', out, errors);
+	copy_moment(where, rule, 'time_start', out, errors);
+	copy_moment(where, rule, 'time_end', out, errors);
+	copy_days(where, rule, out, errors);
+
+	/* The pair is judged by the engine's own window rule - only for a rule that
+	 * is otherwise sound, so a broken field above is not reported twice as a
+	 * broken moment too. A rule that is not all day has to name its start, and
+	 * a start equal to the end is a moment the evaluator drops: importing one
+	 * would hand the operator a rule that never fires and a list that says it
+	 * is there. */
+	if (length(errors) !== mark)
+		return out;
+
+	if (out.all_day === '1')
+		return out;
+
+	if (!is_set(out.time_start))
+		push(errors, `${where}.time_start: a moment, or all_day set to 1, found ${describe_value(rule.time_start)}`);
+	else if (!rule_window(out).valid)
+		push(errors, `${where}: ${out.time_start} and ${out.time_end ?? 'nothing'} are not two different moments`);
+
+	return out;
+}
+
+function normalize_manual(where, row, errors) {
+	const out = {};
+
+	if (type(row) !== 'object') {
+		push(errors, `${where}: a manual entry object, found ${describe_value(row)}`);
+		return null;
+	}
+
+	const mac = norm_mac(row.mac);
+
+	if (mac === null)
+		push(errors, `${where}.mac: a MAC address like aa:bb:cc:dd:ee:ff, found ${describe_value(row.mac)}`);
+	else
+		out.mac = mac;
+
+	copy_text(where, row, 'name', out, errors);
+	copy_choice(where, row, 'action', out, errors, RULE_ACTIONS);
+	copy_ip(where, row, out, errors);
+	copy_text(where, row, 'updated_at', out, errors);
+	copy_text(where, row, 'created_at', out, errors);
+
+	return out;
+}
+
+function normalize_device(where, device, errors) {
+	const out = {};
+
+	if (type(device) !== 'object') {
+		push(errors, `${where}: a device object, found ${describe_value(device)}`);
+		return null;
+	}
+
+	const mac = norm_mac(device.mac);
+
+	if (mac === null)
+		push(errors, `${where}.mac: a MAC address like aa:bb:cc:dd:ee:ff, found ${describe_value(device.mac)}`);
+	else
+		out.mac = mac;
+
+	copy_text(where, device, 'name', out, errors);
+	copy_ip(where, device, out, errors);
+
+	return out;
+}
+
+/* The global section is merged option by option, never replaced as a whole: a
+ * backup written before this application grew an option must not erase the
+ * current value of one it did not know about. */
+function normalize_global(g, errors) {
+	const out = {};
+
+	if (type(g) !== 'object') {
+		push(errors, `global: a settings object, found ${describe_value(g)}`);
+		return out;
+	}
+
+	copy_flag('global', g, 'enabled', out, errors);
+
+	if (is_set(g.timezone)) {
+		const tz = trim(`${text_value(g.timezone) ?? ''}`);
+
+		if (!is_timezone(tz))
+			push(errors, `global.timezone: an IANA zone with data on this device, found ${describe_value(g.timezone)}`);
+		else
+			out.timezone = tz;
+	}
+
+	if (is_set(g.eval_interval)) {
+		const raw = text_value(g.eval_interval);
+		const n = raw === null ? null : to_int(raw, null);
+
+		if (n === null)
+			push(errors, `global.eval_interval: a whole number of seconds, found ${describe_value(g.eval_interval)}`);
+		else
+			out.eval_interval = `${clamp_int(n, DEFAULT_EVAL_INTERVAL, MIN_EVAL_INTERVAL, MAX_EVAL_INTERVAL)}`;
+	}
+
+	if (is_set(g.watchdog_interval)) {
+		const raw = text_value(g.watchdog_interval);
+		const n = raw === null ? null : to_int(raw, null);
+
+		if (n === null)
+			push(errors, `global.watchdog_interval: a whole number of minutes, found ${describe_value(g.watchdog_interval)}`);
+		else
+			out.watchdog_interval = `${clamp_int(n, DEFAULT_WATCHDOG_INTERVAL, MIN_WATCHDOG_INTERVAL, MAX_WATCHDOG_INTERVAL)}`;
+	}
+
+	return out;
+}
+
+/* Everything a document has to answer before it is allowed near the
+ * configuration. `timerules`, `rules` and `devices` must all be present: an
+ * absent key is a document that was never a backup of this package, and reading
+ * it as "no sections of that class" would empty the configuration over a typo.
+ *
+ * `states` is not checked at all and never written. A timerstate row is what the
+ * engine holds right now, not what the operator asked for; importing one could
+ * put a device in the kernel in a state no event of this week produced, and the
+ * next moment of any surviving rule replaces it anyway.
+ *
+ * `.name` is ignored for the same reason the source column ignores it: an
+ * anonymous section name is rehashed from the position in the file on every
+ * read, so the one a backup carries is already somebody else's. */
+function validate_backup(doc) {
+	const errors = [];
+	const parsed = { timerules: [], rules: [], devices: [], global: {} };
+
+	if (type(doc) !== 'object')
+		return { errors: [`the document: a backup object, found ${describe_value(doc)}`], parsed: null };
+
+	for (let field in ['timerules', 'rules', 'devices']) {
+		if (!is_set(doc[field]) || type(doc[field]) !== 'array')
+			push(errors, `${field}: a list of sections, found ${describe_value(doc[field])}`);
+		else if (length(doc[field]) > MAX_RESTORE_SECTIONS)
+			push(errors, `${field}: at most ${MAX_RESTORE_SECTIONS} sections, found ${length(doc[field])}`);
+	}
+
+	if (length(errors))
+		return { errors, parsed: null };
+
+	for (let i = 0; i < length(doc.timerules); i++) {
+		const out = normalize_timerule(`timerules[${i}]`, doc.timerules[i], errors);
+
+		if (out !== null)
+			push(parsed.timerules, out);
+	}
+
+	for (let i = 0; i < length(doc.rules); i++) {
+		const out = normalize_manual(`rules[${i}]`, doc.rules[i], errors);
+
+		if (out !== null)
+			push(parsed.rules, out);
+	}
+
+	for (let i = 0; i < length(doc.devices); i++) {
+		const out = normalize_device(`devices[${i}]`, doc.devices[i], errors);
+
+		if (out !== null)
+			push(parsed.devices, out);
+	}
+
+	parsed.global = normalize_global(is_set(doc.global) ? doc.global : {}, errors);
+
+	if (length(errors))
+		return { errors, parsed: null };
+
+	return { errors, parsed };
+}
+
+/* Delete the three classes the document owns, then write what was validated.
+ *
+ * `timerstate` is not deleted and not written: it is the engine's own record, and
+ * reconcile_ruleless_states() folds any row whose device no longer has a rule or
+ * a manual entry. A section this cannot create is reported rather than half
+ * written - the caller has the archive to go back to, which is why the archive is
+ * written before this function ever runs. */
+function write_backup(parsed) {
+	for (let kind in ['rule', 'device', 'timerule']) {
+		for (let s in sections(kind))
+			uci.delete(CFG, s['.name']);
+	}
+
+	for (let group in [[parsed.rules, 'rule'], [parsed.devices, 'device'], [parsed.timerules, 'timerule']]) {
+		const fields = group[0];
+		const kind = group[1];
+
+		for (let f in fields) {
+			const section = uci.add(CFG, kind);
+
+			if (!is_set(section))
+				return `cannot create a ${kind} section`;
+
+			for (let key in keys(f))
+				set_option(section, key, f[key]);
+		}
+	}
+
+	for (let key in keys(parsed.global))
+		set_option('global', key, parsed.global[key]);
+
+	return null;
+}
+
+/* A manual row is the operator's own words, and the page applies them the moment
+ * it writes one: manual_set() ends with apply_event() for that address. A file can
+ * carry the identical row with no state beside it, and plan() reads states rather
+ * than rows - so an imported block would sit in the list looking enforced while
+ * the chain held nothing, which is the one difference an import must not make
+ * between two configurations that say the same thing.
+ *
+ * Time rules get no such pass, on purpose. The engine is told what to do by the
+ * events themselves and computes no landing for a window it happens to be inside:
+ * a rule that blocks from 22:00 takes effect at 22:00, imported or typed into the
+ * page, and the row the page shows says so through its own source column. */
+function sync_manual_states() {
+	const index = state_index();
+	const arp = arp_table();
+	const leases = lease_table();
+	const now = iso_now(timezone());
+	let written = 0;
+
+	for (let r in sections('rule')) {
+		const mac = norm_mac(r.mac);
+
+		if (mac === null)
+			continue;
+
+		const target = r.action === 'allow' ? 'allow' : 'block';
+
+		if (!apply_event(index, mac, target, 'manual', r['.name'], now, mac_to_ip(mac, arp, leases), null))
+			return { written, error: 'cannot write state row' };
+
+		written++;
+	}
+
+	if (written > 0 && !persist())
+		return { written, error: 'uci commit failed' };
+
+	return { written, error: null };
+}
+
+/* Import a backup: the whole configuration, or nothing. */
+function restore(raw) {
+	load_cfg();
+
+	const text = text_value(raw);
+
+	if (text === null || trim(text) === '')
+		return { ok: false, error: 'no backup sent', errors: ['the request carries no file contents'] };
+
+	let doc = null;
+
+	/* ucode here can read JSON but cannot write it - `json(text)` decodes and the
+	 * same call on a table is an error - which is why the archive below is a copy
+	 * of the file rather than another rendering of it. */
+	try {
+		doc = json(text);
+	} catch (e) {
+		return { ok: false, error: 'the file is not JSON', errors: [`${e}`] };
+	}
+
+	const checked = validate_backup(doc);
+
+	if (length(checked.errors))
+		return { ok: false, error: `${length(checked.errors)} problem(s) in the backup`, errors: checked.errors };
+
+	/* Last step before anything is destroyed, and a failure here stops the
+	 * import: an overwrite nobody can undo is not an import, it is a loss. */
+	const previous = readfile(CONFIG_FILE);
+
+	if (!is_set(previous))
+		return { ok: false, error: 'cannot read the current configuration', errors: ['the configuration file is not readable'] };
+
+	if (writefile(RESTORE_ARCHIVE, previous) === null)
+		return { ok: false, error: 'cannot archive the current configuration', errors: [`writing ${RESTORE_ARCHIVE} failed`] };
+
+	const failure = write_backup(checked.parsed);
+
+	if (failure !== null) {
+		/* libuci writes every set and delete to the package's pending delta as it
+		 * happens, so a failed write leaves the sections this attempt deleted
+		 * staged there - and the next commit of any kind would bake in half an
+		 * import. Reverting is safe precisely because the views commit as they
+		 * save: the only pending change a revert can lose is this attempt's own. */
+		run(`uci -q revert ${CFG}`);
+		return { ok: false, error: failure, saved_to: RESTORE_ARCHIVE, errors: [failure] };
+	}
+
+	if (!persist()) {
+		run(`uci -q revert ${CFG}`);
+		return { ok: false, error: 'uci commit failed', saved_to: RESTORE_ARCHIVE, errors: ['uci commit failed'] };
+	}
+
+	/* The same tail a form save runs, plus the one step a save does not need
+	 * because its caller already took it: the device list is completed from the
+	 * rules, cron and the evaluation loop are re-aimed, states without a rule are
+	 * folded, every manual row on file is applied the way manual_set() applies the
+	 * row it just wrote, and the chain is rebuilt with no comparison - the file is
+	 * the reason the kernel has to change, and whether it already looks right is
+	 * not the operator's question. */
+	load_cfg();
+
+	const registered = sync_devices();
+	const cron = sync_cron();
+	const daemon = start_daemon();
+	const sync = reconcile_ruleless_states();
+
+	if (sync.error !== null)
+		return { ok: false, error: sync.error, saved_to: RESTORE_ARCHIVE, errors: [sync.error] };
+
+	/* After the fold, so a row the file deleted is folded before the rows the file
+	 * brought are applied; the two never write the same address twice in one
+	 * import. */
+	const manual = sync_manual_states();
+
+	if (manual.error !== null)
+		return { ok: false, error: manual.error, saved_to: RESTORE_ARCHIVE, errors: [manual.error] };
+
+	const res = rebuild(true);
+
+	log('info', `imported: ${length(checked.parsed.timerules)} time rule(s), ` +
+		`${length(checked.parsed.rules)} manual row(s), ${length(checked.parsed.devices)} device(s), ` +
+		`${manual.written} manual state(s), previous configuration at ${RESTORE_ARCHIVE}`);
+
+	return {
+		ok: res.ok && cron && registered && daemon.ok,
+		timerules: length(checked.parsed.timerules),
+		rules: length(checked.parsed.rules),
+		devices: length(checked.parsed.devices),
+		/* Named, not counted quietly: "your file had 9 state rows and none of them
+		 * were read" is the answer to the question an operator holding a backup
+		 * will ask when the states look different afterwards. */
+		states_skipped: is_set(doc.states) && type(doc.states) === 'array' ? length(doc.states) : 0,
+		/* The rows the file wrote are also the states behind them; naming the count
+		 * is what tells an operator that an imported manual block is in force now,
+		 * not waiting for something to happen. */
+		manual_states: manual.written,
+		saved_to: RESTORE_ARCHIVE,
+		cron,
+		daemon,
+		blocked: res.blocked,
+		error: res.error
+	};
+}
+
 /* ── public API ───────────────────────────────────────── */
 
 const methods = {
@@ -2173,9 +2737,17 @@ const methods = {
 		}
 	},
 
-	/* Single hook the views call after form.Map has committed UCI. */
+	/* Single hook the views call after form.Map has committed UCI.
+	 *
+	 * `force` is not a synonym for "save harder" - only the toolbar's 立即同步
+	 * button sends it, and it decides whether an nft transaction goes out at all
+	 * (rebuild() skips its comparison on that path). A form save that set it too
+	 * would rewrite the chain whenever anything was edited, including a device
+	 * name, and would sweep the connections of every blocked device while doing
+	 * so. */
 	apply: {
-		call: function () {
+		args: { force: 'string' },
+		call: function (request) {
 			load_cfg();
 
 			/* Both cleanups commit by themselves, so a failed write has to stop the
@@ -2194,9 +2766,9 @@ const methods = {
 			if (sync.error !== null)
 				return { result: { ok: false, error: sync.error, blocked: 0 } };
 
-			const res = rebuild();
+			const res = rebuild((request.args ?? {}).force);
 
-			return { result: { ok: res.ok && cron, cron, daemon, blocked: res.blocked, error: res.error } };
+			return { result: { ok: res.ok && cron, cron, daemon, blocked: res.blocked, rewritten: res.rewritten, error: res.error } };
 		}
 	},
 
@@ -2292,6 +2864,16 @@ const methods = {
 	},
 
 	/* JSON dump of everything the UI edits; the view turns it into a download. */
+	restore: {
+		/* The whole file as one string: the browser holds it already, and a second
+		 * round trip to hand the router a document it is about to overwrite its
+		 * configuration with would only add a place for it to be lost. */
+		args: { json: 'string' },
+		call: function (request) {
+			return { result: restore((request.args ?? {}).json) };
+		}
+	},
+
 	backup: {
 		call: function () {
 			load_cfg();
