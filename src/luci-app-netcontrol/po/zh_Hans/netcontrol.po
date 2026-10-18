@@ -395,8 +395,8 @@ msgstr "周四"
 msgid "time rule"
 msgstr "时间规则"
 
-msgid "time rule (deleted)"
-msgstr "时间规则（已删除）"
+msgid "time rule (changed)"
+msgstr "时间规则（已变更）"
 
 msgid "Time rules"
 msgstr "时间规则"

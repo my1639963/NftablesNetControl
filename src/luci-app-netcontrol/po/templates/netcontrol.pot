@@ -394,7 +394,7 @@ msgstr ""
 msgid "time rule"
 msgstr ""
 
-msgid "time rule (deleted)"
+msgid "time rule (changed)"
 msgstr ""
 
 msgid "Time rules"

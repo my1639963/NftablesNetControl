@@ -3,6 +3,17 @@
 
 const TZ = 'Asia/Shanghai';
 
+/* contains_value() compares through to_int() because it was written for
+ * day_values, so it cannot test a fingerprint string - it rejects every stamp.
+ * Membership of a stamp gets asked here instead. */
+function produces(stamps, want) {
+	for (let s in stamps)
+		if (s === want)
+			return true;
+
+	return false;
+}
+
 function stamp(epoch) {
 	return trim(run(`${tz_prefix(TZ)}date -d @${epoch} '+%a %m-%d %H:%M' 2>/dev/null`).out);
 }
@@ -27,8 +38,8 @@ function dump(title, rules, from, to) {
 		const local = local_parts(TZ, e.epoch);
 		const rule = rule_of(rules, e.section);
 
-		print(sprintf('  %s  %s -> %s  sec=%s  dow=%d day=%d  cycle=%s matches=%s\n',
-			stamp(e.epoch), e.kind, e.target, e.section,
+		print(sprintf('  %s  %s -> %s  sec=%s  stamp=%s  dow=%d day=%d  cycle=%s matches=%s\n',
+			stamp(e.epoch), e.kind, e.target, e.section, e.stamp,
 			local.dow, local.day, rule.cycle_type ?? 'daily',
 			cycle_matches(rule, local) ? 'yes' : 'no'));
 	}
@@ -103,6 +114,15 @@ dump('T5 weekly Friday-only block 20:00-06:00 (one week)',
 	[mk('w', 'block', '20:00', '06:00', 'weekly', ['5'], false)],
 	base - 60, base + 7 * 86400);
 
+/* The shape the manual-delete replay writes for a whole day rule: both moments
+ * are 00:00, and the one landing on Saturday is filtered by Friday's cycle.
+ * Pair them the other way and this rule yields nothing at all - which is how
+ * the all_day fingerprint the owner test reads used to be provable only by
+ * typing it into UCI by hand. */
+dump('T5b weekly Friday all_day block (end lands on Saturday)',
+	[mk('f', 'block', null, null, 'weekly', ['5'], true)],
+	base - 60, base + 7 * 86400);
+
 dump('T6 monthly day 31 inside June (30 days) - must be empty',
 	[mk('m', 'block', '08:00', '09:00', 'monthly', ['31'], false)],
 	base - 60, base + 30 * 86400);
@@ -142,5 +162,47 @@ const nm = rule_next_event(mk('m', 'block', '08:00', '09:00', 'monthly', ['31'],
 
 print(sprintf('  block 08-10 at 09:00 -> %s kind=%s target=%s in %d min\n', ne.at, ne.kind, ne.target, ne.minutes));
 print(sprintf('  allow 22-06 at 23:00 -> %s kind=%s target=%s in %d min\n', nd.at, nd.kind, nd.target, nd.minutes));
-print(sprintf('  weekly fri 20-23 at mon 00:00 -> %s kind=%s target=%s in %d min\n', nw.at, nw.kind, nw.target, nw.minutes));
-print(sprintf('  monthly day 31 read at 2026-02-01 -> %s kind=%s target=%s in %d days\n', nm.at, nm.kind, nm.target, (nm.minutes / 1440) | 0));
+print(sprintf('  weekly fri 20-23 at mon 00:00 -> %s kind=%s target=%s in %d min\n',
+	nw.at, nw.kind, nw.target, nw.minutes));
+print(sprintf('  monthly day 31 read at 2026-02-01 -> %s kind=%s target=%s in %d days\n',
+	nm.at, nm.kind, nm.target, (nm.minutes / 1440) | 0));
+
+/* Every shape the engine recognises, in one list, read the two ways the
+ * fingerprint contract is spelled: rule_stamps() is what the owner test asks,
+ * events_in_range() is what writes a state row's `writer`. A stamp the stream
+ * writes that the owner test cannot produce is exactly the drift that makes the
+ * screen call a live rule changed - so the stray count is the one number here
+ * that has to stay 0, on this build and on every later one. */
+const CORPUS = [
+	mk('a', 'allow', '08:00', '10:00', 'daily', null, false),
+	mk('b', 'block', '09:00', '11:00', 'daily', null, false),
+	mk('c', 'block', '22:00', '06:00', 'daily', null, false),
+	mk('d', 'allow', null, null, 'daily', null, true),
+	mk('w', 'block', '20:00', '06:00', 'weekly', ['5'], false),
+	mk('f', 'block', null, null, 'weekly', ['5'], true),
+	mk('m', 'block', '08:00', '09:00', 'monthly', ['31'], false),
+	mk('s', 'block', '22:00', null, 'daily', null, false),
+	mk('i1', 'block', '25:00', '06:00', 'daily', null, false),
+	mk('i2', 'block', '08:00', '08:00', 'daily', null, false)
+];
+
+print('\n== rule_stamps() per rule ==\n');
+
+for (let r in CORPUS)
+	print(sprintf('  %s -> %s\n', r['.name'], strjoin(rule_stamps(r), ',')));
+
+print('\n== stream stamps vs rule_stamps ==\n');
+
+const checked = events_in_range(CORPUS, base - 60, base + 31 * 86400, TZ);
+const stray = [];
+
+for (let e in checked)
+	if (!produces(rule_stamps(rule_of(CORPUS, e.section)), e.stamp))
+		push(stray, sprintf('%s %s at %s', e.section, e.stamp, stamp(e.epoch)));
+
+print(sprintf('  %d events in 31 days, %d with a stamp no rule_stamps() produced (EXPECT 0)\n',
+	length(checked), length(stray)));
+
+for (let s in stray)
+	print(sprintf('    %s\n', s));
+

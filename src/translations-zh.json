@@ -143,6 +143,6 @@
  "starts": "开始",
  "stopped": "已停止",
  "time rule": "时间规则",
- "time rule (deleted)": "时间规则（已删除）",
+ "time rule (changed)": "时间规则（已变更）",
  "unknown error": "未知错误"
 }

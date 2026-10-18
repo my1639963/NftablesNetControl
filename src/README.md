@@ -27,7 +27,11 @@ A device left with no enabled rule is handed at save time to what is still
 configured - its manual row, or open when there is none. A device that still has
 rules is not recomputed when one of them is deleted, even when the deleted rule
 was the one that wrote the current state: that state holds until a surviving rule
-next speaks, and the status page marks the row's source as a deleted rule.
+next speaks. The status page then names the source as changed once no enabled rule
+of that device can still produce the moment the row records in `writer` (say
+`block@22:30`). That fingerprint and never the section name is what gets compared:
+`config timerule` is anonymous, so UCI rehashes `cfgXXXXXX` from the position in the
+file and deleting one rule renames every rule behind it.
 
 ## Building
 
@@ -59,7 +63,10 @@ next speaks, and the status page marks the row's source as a deleted rule.
 
 失去全部启用规则的设备会在保存时交给仍然存在的配置——有手动条目就按条目下发，没有就放开。
 但名下还有规则的设备不会因为删掉一条而被重算，即便删掉的正是写下当前状态的那条：状态会
-保持到剩余规则的下一次动作，状态总览的来源列会把这一行标成「时间规则（已删除）」。
+保持到剩余规则的下一次动作。这时如果该设备已没有任何启用规则还能产出这一行记下的那个时刻
+（`timerstate` 的 `writer`，如 `block@22:30`），状态总览的来源列就把它标成「时间规则（已变更）」。
+比对用的是这个事件指纹而不是段名：`config timerule` 是匿名段，uci 每次读取都按它在文件里的位置
+重算 `cfgXXXXXX`，删掉一条会让后面所有规则集体改名、继承被删那段的旧名字。
 
 ## 构建
 

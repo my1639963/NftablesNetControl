@@ -569,13 +569,46 @@ function flip(target) {
 	return target === 'allow' ? 'block' : 'allow';
 }
 
+/* Minutes since midnight back into the clock face a rule is written with. */
+function hhmm(mins) {
+	return sprintf('%02d:%02d', (mins / 60) | 0, mins % 60);
+}
+
+/* What a state row records as the moment that wrote it: the state produced and the
+ * clock face it was due on. Deliberately not the section name - `config timerule`
+ * is anonymous in /etc/config/netcontrol, so ucode rehashes `cfgXXXXXX` from the
+ * position on every read and deleting one rule renames every rule behind it. A name
+ * would be a fingerprint that a plain delete destroys. */
+function event_stamp(target, minute) {
+	return `${target}@${hhmm(minute)}`;
+}
+
+/* The only three answers the screens speak for a state row's source. `none` means
+ * the row was handed back to open and no layer is in charge of it, and drawing
+ * that as a time rule would put a rule on the screen in the same breath as the
+ * rule count one row above says zero. A spelling the engine never writes - a hand
+ * typed `Timer`, an empty field - folds to the same answer here, so the status
+ * page and the preview panel can never disagree about one device. */
+function fold_source(source) {
+	const v = `${source ?? ''}`;
+
+	if (v === 'manual')
+		return 'manual';
+
+	return v === 'timer' ? 'timer' : 'none';
+}
+
+/* The only two states a row can be in. Anything that is not the word `block` is
+ * open, which is also the one plan() blocks on. */
+function fold_state(state) {
+	return `${state ?? ''}` === 'block' ? 'block' : 'allow';
+}
+
 /* The moments a rule owns. The start moment is required and runs the rule's own
  * action; the end moment is optional and runs the opposite one, so "block this
  * device every day at 10:00" is a complete rule rather than a half filled
- * window. A cross-midnight window - and the whole day flag, which is 00:00 to
- * the next 00:00 - places its end on the following day, so the cycle check for
- * that end keeps using the day the window started on. A window whose ends match
- * its start has no moments to run and yields nothing. */
+ * window. A window whose ends match its start has no moments to run and yields
+ * nothing. */
 function rule_window(rule) {
 	if (is_bool(rule.all_day, false))
 		return { valid: true, start: 0, end: 0, cross: true };
@@ -587,6 +620,53 @@ function rule_window(rule) {
 		return { valid: false, start: null, end: null, cross: false };
 
 	return { valid: true, start, end, cross: end !== null && end < start };
+}
+
+/* The moments a rule owns, spelled the way an event carries them: the minute of
+ * the day, the state it writes, the fingerprint a state row records, and the day
+ * whose cycle filters it - a cross-midnight end, and the whole day flag's, run on
+ * the following day but belong to the day the window opened on. Reading the
+ * window rather than the two time fields is what makes a whole day rule own an
+ * end moment nobody typed into `time_end`.
+ *
+ * The event stream, the owner test and the preview ask this one question and all
+ * three answer it here. The fingerprint is only trustworthy while they do:
+ * `writer` is written by the stream and judged by the owner test, so a second
+ * copy that drifts makes the screen call a live rule changed - the error the
+ * fingerprint exists to remove. */
+function rule_moments(rule) {
+	const w = rule_window(rule);
+
+	if (!w.valid)
+		return [];
+
+	const target = rule_target(rule);
+	const opposite = flip(target);
+	const out = [{
+		kind: 'start',
+		minute: w.start,
+		target: target,
+		stamp: event_stamp(target, w.start),
+		prev_day: false
+	}];
+
+	if (w.end === null)
+		return out;
+
+	push(out, {
+		kind: 'end',
+		minute: w.end,
+		target: opposite,
+		stamp: event_stamp(opposite, w.end),
+		prev_day: w.cross
+	});
+
+	return out;
+}
+
+/* The fingerprints this rule can write, for the owner test. */
+function rule_stamps(rule) {
+	return map(rule_moments(rule), function (m) { return m.stamp; });
 }
 
 function enabled_timerules() {
@@ -667,6 +747,26 @@ function day_range(tz, from, to, limit) {
 	return out;
 }
 
+/* One rule's moments of one day, filed into the bucket its kind chooses. The day
+ * frame carries the previous day's parts because a cross-midnight end is filtered
+ * by the cycle of the day its window opened on, not the day it lands on. */
+function push_day_events(starts, ends, rule, day) {
+	const base = { mac: norm_mac(rule.device_mac), section: rule['.name'] };
+
+	for (let m in rule_moments(rule)) {
+		if (!cycle_matches(rule, m.prev_day ? day.pp : day.p))
+			continue;
+
+		push_bucket(m.kind === 'end' ? ends : starts, m.minute,
+			merge(base, {
+				epoch: day.mid + m.minute * 60,
+				target: m.target,
+				kind: m.kind,
+				stamp: m.stamp
+			}));
+	}
+}
+
 /* Every event due in (from, to], oldest first. Within one minute an end runs
  * before a start, so a window closing at 10:00 cannot cancel one opening at
  * 10:00 before the operator sees the flip; inside the same group the UCI
@@ -679,24 +779,8 @@ function events_in_range(rules, from, to, tz) {
 		const starts = {};
 		const ends = {};
 
-		for (let i = 0; i < length(rules); i++) {
-			const r = rules[i];
-			const w = rule_window(r);
-
-			if (!w.valid)
-				continue;
-
-			const base = { mac: norm_mac(r.device_mac), section: r['.name'] };
-			const endDay = w.cross ? d.pp : d.p;
-
-			if (cycle_matches(r, d.p))
-				push_bucket(starts, w.start,
-					merge(base, { epoch: d.mid + w.start * 60, target: rule_target(r), kind: 'start' }));
-
-			if (w.end !== null && cycle_matches(r, endDay))
-				push_bucket(ends, w.end,
-					merge(base, { epoch: d.mid + w.end * 60, target: flip(rule_target(r)), kind: 'end' }));
-		}
+		for (let r in rules)
+			push_day_events(starts, ends, r, d);
 
 		for (let t = 0; t < 1440; t++) {
 			for (let e in bucket_of(ends, t))
@@ -752,30 +836,31 @@ function current_time_target(mac) {
 
 	const last = events[length(events) - 1];
 
-	return { target: last.target, source: 'timer', section: last.section };
+	return { target: last.target, source: 'timer', section: last.section, writer: last.stamp };
 }
 
 /* The first event a rule will produce after now, or null. The caller builds one
  * shared day frame (see NEXT_EVENT_DAYS) and every day of it precedes the next,
- * so the first day holding a candidate already answers the question. */
+ * so the first day holding a candidate already answers the question.
+ *
+ * Where a rule's own two moments fall in the same minute - the whole day flag -
+ * this names the start while tick() runs the end first. The state the preview
+ * describes is the one the stream settles on, and that is the start's target, so
+ * the two answers agree on the outcome without agreeing on the order. */
 function rule_next_event(rule, tz, now, days) {
-	const w = rule_window(rule);
-
-	if (!w.valid)
-		return null;
+	const moments = rule_moments(rule);
 
 	for (let d in days) {
 		let cand = null;
-		const endDay = w.cross ? d.pp : d.p;
 
-		if (cycle_matches(rule, d.p) && d.mid + w.start * 60 > now)
-			cand = { epoch: d.mid + w.start * 60, target: rule_target(rule), kind: 'start' };
+		for (let m in moments) {
+			if (!cycle_matches(rule, m.prev_day ? d.pp : d.p))
+				continue;
 
-		if (w.end !== null && cycle_matches(rule, endDay)) {
-			const endEpoch = d.mid + w.end * 60;
+			const epoch = d.mid + m.minute * 60;
 
-			if (endEpoch > now && (cand === null || endEpoch < cand.epoch))
-				cand = { epoch: endEpoch, target: flip(rule_target(rule)), kind: 'end' };
+			if (epoch > now && (cand === null || epoch < cand.epoch))
+				cand = { epoch: epoch, kind: m.kind, target: m.target };
 		}
 
 		if (cand !== null)
@@ -915,8 +1000,15 @@ function state_index() {
 }
 
 /* The single entry point every state change goes through. Logging happens even
- * when the state did not move: an executed event is not the same as a flip. */
-function apply_event(index, mac, target, source, section, when, ip) {
+ * when the state did not move: an executed event is not the same as a flip.
+ *
+ * `writer` is the moment that produced this state, as event_stamp() spells it, and
+ * only a time event has one. manual_set() and reconcile_ruleless_states() pass
+ * null, which clears the field: a row handed to a manual click or back to open no
+ * longer has a rule to point at, and leaving the old stamp behind would be a claim
+ * nothing wrote. manual_delete() passes the stamp of the event it just replayed,
+ * because that one really did write the state it is restoring. */
+function apply_event(index, mac, target, source, section, when, ip, writer) {
 	let sec = index[mac] ?? null;
 
 	if (sec === null) {
@@ -939,6 +1031,7 @@ function apply_event(index, mac, target, source, section, when, ip) {
 	set_option(sec, 'state', target);
 	set_option(sec, 'source', source);
 	set_option(sec, 'section', section ?? '');
+	set_option(sec, 'writer', writer ?? '');
 	set_option(sec, 'at', when);
 
 	if (is_set(ip))
@@ -998,7 +1091,7 @@ function tick() {
 	const leases = lease_table();
 
 	for (let e in events)
-		apply_event(index, e.mac, e.target, 'timer', e.section, iso_at(tz, e.epoch), mac_to_ip(e.mac, arp, leases));
+		apply_event(index, e.mac, e.target, 'timer', e.section, iso_at(tz, e.epoch), mac_to_ip(e.mac, arp, leases), e.stamp);
 
 	/* Only advance the pointer once the events are on disk: re-running an
 	 * applied event is idempotent, losing one to a failed commit is not. */
@@ -1026,8 +1119,8 @@ function plan(enabled, states) {
 		if (mac === null || is_set(planned[mac]))
 			continue;
 
-		const source = s.source === 'manual' ? 'manual' : 'timer';
-		const held = s.state === 'block';
+		const source = fold_source(s.source);
+		const held = fold_state(s.state) === 'block';
 
 		/* A manual decision is the operator's own words and survives the global
 		 * switch; a clock decision does not. */
@@ -1135,66 +1228,68 @@ function timed_macs() {
 	return out;
 }
 
-/* The enabled rules by the section name a state row records as its writer, holding
- * what each one still points at and which states it could have written. `timerstate
- * .section` says which rule last spoke for the device, so this answers the narrower
- * question - is that rule still configured to act on this device - and deleted,
- * disabled and re-aimed at another address all answer no. One pass over UCI and no
- * `date`, because the status page asks it every 15 seconds.
+/* The moments each device's enabled rules can still write, gathered per address.
+ * A state row names the moment that wrote it, so this answers the narrower
+ * question - could this event still be produced - and deleting, disabling or
+ * re-aiming a rule all answer no unless another enabled rule on the same device
+ * owns the very same moment. One pass over UCI and no `date`, because the status
+ * page asks it every 15 seconds.
  *
- * The name cannot answer it alone. `config timerule` is written anonymously into
- * /etc/config/netcontrol, so ucode rehashes `cfgXXXXXX` from the position in the
- * file: deleting a rule renames every rule behind it, and the survivor inherits the
- * dead rule's name. On the name alone a delete would then read as if nothing was
- * lost. Matching the address and the writable states narrows that to the one case
- * where the name it inherited is also held by a rule of the same device that writes
- * the same state - a live rule that explains the state as well as the dead one did.
+ * Deliberately keyed on the address and the event, never on the section name.
+ * `config timerule` is written anonymously into /etc/config/netcontrol, so ucode
+ * rehashes `cfgXXXXXX` from the position in the file on every read: deleting one
+ * rule renames every rule behind it, and a survivor inherits the dead rule's
+ * name. A name stored in a state row is therefore a fingerprint that the ordinary
+ * act of deleting destroys - which is how a live rule got reported as gone.
  *
- * A rule with an end moment writes both states: the start runs its own action, the
- * end runs the opposite one. */
+ * The stamps come from rule_moments(), the same answer the event stream builds its
+ * `writer` from, because a fingerprint judged against a second copy of the rule is
+ * how a live rule would get reported as gone all over again. */
 function timerule_owners() {
 	const out = {};
 
-	for (let r in enabled_timerules())
-		out[r['.name']] = {
-			mac: norm_mac(r.device_mac),
-			target: rule_target(r),
-			both: is_set(r.time_end) && r.time_end !== '',
-		};
+	for (let r in enabled_timerules()) {
+		const mac = norm_mac(r.device_mac);
+
+		if (mac === null)
+			continue;
+
+		if (!is_set(out[mac]))
+			out[mac] = {};
+
+		for (let stamp in rule_stamps(r))
+			out[mac][stamp] = true;
+	}
 
 	return out;
 }
 
-/* Whether the rule that wrote a state row still governs that device. A row not
- * written by a rule - the operator's own manual row, or the nameless open state -
- * has no owner that could have gone missing, and neither does a row with an empty
- * `section`, which is a hand edited or pre-recording leftover rather than a loss.
+/* Whether the moment a state row records is one the device's enabled rules can
+ * still produce. A row not written by a rule - the operator's own manual row, or
+ * the nameless open state - has no owner that could have gone missing, and
+ * neither does a row without a `writer`, which is a hand edited row or one written
+ * before the fingerprint existed rather than a loss.
  *
  * This is a display fact only. Nothing is recomputed from it: a device that still
  * has another enabled rule keeps whatever state the vanished rule left, and the
  * engine moves it at the next moment of the surviving rules, never on the delete. */
 function owner_alive(s, mac, owners) {
-	if (`${s.source ?? 'none'}` !== 'timer')
+	if (fold_source(s.source) !== 'timer')
 		return true;
 
-	const owner = `${s.section ?? ''}`;
+	const stamp = `${s.writer ?? ''}`;
 
-	if (owner === '')
+	if (stamp === '')
 		return true;
 
 	const who = norm_mac(mac);
 
 	/* An address the config spells wrong has nothing to compare against, and an
-	 * unanswerable question must not be reported as a deleted rule. */
+	 * unanswerable question must not be reported as a lost rule. */
 	if (who === null)
 		return true;
 
-	const live = owners[owner];
-
-	if (live === null || live.mac !== who)
-		return false;
-
-	return live.both || live.target === (`${s.state}` === 'block' ? 'block' : 'allow');
+	return (owners[who] ?? {})[stamp] === true;
 }
 
 /* A device whose last enabled time rule was deleted, disabled or moved to
@@ -1208,10 +1303,11 @@ function owner_alive(s, mac, owners) {
  * two answers drift apart. Rows whose source is already manual are the
  * operator's own words and stay untouched.
  *
- * Skipping is not forgetting. When the rule that wrote a state is gone but others
- * are left, the state holds until a survivor speaks, and status() reports that
- * row's owner as missing so the page can say which rule is no longer there. No
- * landing is computed for a delete: the engine moves a device by events.
+ * Skipping is not forgetting. When the moment a state row records is no longer one
+ * the device's rules can produce but others are left, the state holds until a
+ * survivor speaks, and status() reports that row's writer as gone so the page can
+ * say the source changed. No landing is computed for a delete: the engine moves a
+ * device by events.
  *
  * Reaching for manual_row() instead of current_time_target() is what keeps this
  * cheap enough to run on every save: no replay, no extra `date`. */
@@ -1227,7 +1323,7 @@ function reconcile_ruleless_states() {
 	for (let s in sections('timerstate')) {
 		const mac = norm_mac(s.mac);
 
-		if (mac === null || s.source === 'manual' || is_set(seen[mac]) || is_set(timed[mac]))
+		if (mac === null || fold_source(s.source) === 'manual' || is_set(seen[mac]) || is_set(timed[mac]))
 			continue;
 
 		seen[mac] = true;
@@ -1240,7 +1336,7 @@ function reconcile_ruleless_states() {
 		if (`${s.state ?? 'allow'}` === target && `${s.source ?? 'none'}` === source)
 			continue;
 
-		if (!apply_event(index, mac, target, source, section, now, mac_to_ip(mac, arp, leases)))
+		if (!apply_event(index, mac, target, source, section, now, mac_to_ip(mac, arp, leases), null))
 			return { changed, error: 'cannot write state row' };
 
 		changed++;
@@ -1449,7 +1545,7 @@ function manual_set(target, action, name) {
 
 	const index = state_index();
 
-	apply_event(index, target, wanted, 'manual', section, now, ip);
+	apply_event(index, target, wanted, 'manual', section, now, ip, null);
 
 	if (!persist())
 		return { ok: false, error: 'uci commit failed' };
@@ -1501,7 +1597,7 @@ function manual_delete(target) {
 	const index = state_index();
 
 	apply_event(index, address, restore.target, restore.source === 'none' ? 'none' : 'timer',
-		restore.section, iso_now(timezone()), mac_to_ip(address, arp, leases));
+		restore.section, iso_now(timezone()), mac_to_ip(address, arp, leases), restore.writer);
 
 	if (!persist())
 		return { ok: false, error: 'uci commit failed' };
@@ -1833,14 +1929,15 @@ function status() {
 				section: s['.name'],
 				mac,
 				name: names[mac] ?? row?.name ?? mac,
-				/* Kept as written, folds included nothing into: a device handed back to
-				 * open by reconcile_ruleless_states() carries `none`, and calling that
-				 * "time rule" here would put a rule on the screen in the same breath as
-				 * the timerule count one row above says zero. */
-				source: s.source === 'manual' ? 'manual' : (s.source === 'none' ? 'none' : 'timer'),
+				/* One fold for both pages: a device handed back to open by
+				 * reconcile_ruleless_states() carries `none`, and calling that "time
+				 * rule" would put a rule on the screen in the same breath as the
+				 * timerule count one row above says zero. */
+				source: fold_source(s.source),
 				owner_alive: owner_alive(s, mac, owners),
-				state: s.state === 'block' ? 'block' : 'allow',
+				state: fold_state(s.state),
 				rule_section: s.section ?? null,
+				writer: s.writer ?? null,
 				at: s.at ?? null,
 				ip: (s.ip && s.ip !== 'unknown') ? s.ip : mac_to_ip(mac, arp, leases),
 				online: is_set(online[mac]),
@@ -1976,7 +2073,7 @@ function preview_snapshot(wanted) {
 
 		const rows = by_state[mac] ?? [];
 		const st = length(rows) ? rows[0] : null;
-		const source = st?.source ?? null;
+		const source = fold_source(st?.source);
 
 		/* Why the state is what it is, in the three steps the operator can check:
 		 * no row at all, a manual row, or a clock owned device. */
@@ -1995,10 +2092,11 @@ function preview_snapshot(wanted) {
 			 * do", and reading the chain here would make it disagree with the
 			 * status page the moment the two drift apart. */
 			blocked: planned.decisions[mac]?.blocked === true,
-			state: st?.state ?? 'allow',
+			state: fold_state(st?.state),
 			source,
 			owner_alive: st === null ? true : owner_alive(st, mac, owners),
 			section: st?.section ?? null,
+			writer: st?.writer ?? null,
 			at: st?.at ?? null,
 			reason,
 			rules: map(by_time[mac] ?? [], function (r) {

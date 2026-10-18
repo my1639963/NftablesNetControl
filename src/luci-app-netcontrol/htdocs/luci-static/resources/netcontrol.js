@@ -100,16 +100,17 @@ return baseclass.extend({
 	 * device has neither a manual row nor a time rule, so no word is the honest
 	 * answer and a bare em dash costs no translation.
 	 *
-	 * `alive` is the engine's answer to "is the rule that wrote this row still
-	 * configured for this device". When it is not, the name of a rule the operator
-	 * has already deleted would otherwise keep reading as the reason the device is
-	 * blocked - and the state does hold until a surviving rule speaks. */
+	 * `alive` is the engine's answer to "can an enabled rule of this device still
+	 * produce the moment this row records". When it cannot, calling the state a
+	 * time rule would suggest a clock that is still turning for this device, while
+	 * deleting, disabling, re-aiming and editing a rule all answer the same way:
+	 * the source changed. The state itself holds until a surviving rule speaks. */
 	sourceLabel(source, alive) {
 		if (source === 'manual')
 			return _('manual');
 
 		if (source === 'timer')
-			return alive === false ? _('time rule (deleted)') : _('time rule');
+			return alive === false ? _('time rule (changed)') : _('time rule');
 
 		return '—';
 	},
