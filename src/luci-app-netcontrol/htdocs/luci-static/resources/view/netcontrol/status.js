@@ -156,14 +156,6 @@ return view.extend({
 		});
 	},
 
-	yesno(value) {
-		return value ? _('Yes') : _('No');
-	},
-
-	badge(text, kind) {
-		return E('span', { 'class': 'nc-badge nc-%s'.format(kind) }, text);
-	},
-
 	levelLabel(kind) {
 		if (kind === 'error')
 			return _('ERROR');
@@ -197,7 +189,7 @@ return view.extend({
 			out.push(['warn', _('Hardware flow offloading is active: established flows may keep passing after a device is blocked.')]);
 
 		if (!st.daemon_running)
-			out.push(['info', _('The evaluation loop is not running; time rules only change on cron ticks or manual reconcile.')]);
+			out.push(['info', _('The evaluation loop is not running; the watchdog starts it again on its next round, and until then time rules change only on the backstop tick.')]);
 
 		return out;
 	},
@@ -209,22 +201,22 @@ return view.extend({
 		if (issues.length) {
 			nodes.push(E('div', { 'class': 'nc-issues' }, issues.map(function (i) {
 				return E('div', { 'class': 'nc-issue nc-issue-%s'.format(i[0]) }, [
-					this.badge(this.levelLabel(i[0]), i[0]), ' ', i[1]
+					netcontrol.badge(this.levelLabel(i[0]), i[0]), ' ', i[1]
 				]);
 			}, this)));
 		}
 
 		nodes.push(E('h3', {}, _('Enforcement')));
 		nodes.push(E('table', { 'class': 'table cbi-section-table nc-facts' }, [
-			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Global switch')), E('td', { 'class': 'td' }, this.yesno(st.enabled))]),
+			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Global switch')), E('td', { 'class': 'td' }, netcontrol.yesnoBadge(st.enabled))]),
 			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Blocked in kernel / expected')), E('td', { 'class': 'td' }, [
 				'%d / %d'.format(st.kernel_macs.length, st.expected_macs.length),
 				' ',
-				this.badge(st.consistent ? _('consistent') : _('drifted'), st.consistent ? 'ok' : 'warn')
+				netcontrol.badge(st.consistent ? _('consistent') : _('drifted'), st.consistent ? 'ok' : 'warn')
 			])]),
 			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Drop rules in chain')), E('td', { 'class': 'td' }, '%d'.format(st.drop_rules))]),
 			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Evaluation loop')), E('td', { 'class': 'td' }, [
-				this.badge(st.daemon_running ? _('running') : _('stopped'), st.daemon_running ? 'ok' : 'warn'),
+				netcontrol.badge(st.daemon_running ? _('running') : _('stopped'), st.daemon_running ? 'ok' : 'warn'),
 				' ', '%ds'.format(st.eval_interval)
 			])]),
 			E('tr', { 'class': 'tr' }, [E('td', { 'class': 'td' }, _('Watchdog interval')), E('td', { 'class': 'td' }, '%d min'.format(st.watchdog_interval))]),
@@ -253,9 +245,12 @@ return view.extend({
 						E('td', { 'class': 'td cbi-value-field' }, d.name || '—'),
 						E('td', { 'class': 'td cbi-value-field' }, d.ip || '—'),
 						E('td', { 'class': 'td cbi-value-field' }, netcontrol.stateSpan(d.state === 'block')),
-						E('td', { 'class': 'td cbi-value-field' }, d.source === 'manual' ? _('manual') : _('time rule')),
+						E('td', { 'class': 'td cbi-value-field' }, netcontrol.sourceLabel(d.source, d.owner_alive)),
 						E('td', { 'class': 'td cbi-value-field' }, d.at || '—'),
-						E('td', { 'class': 'td cbi-value-field' }, this.yesno(d.blocked))
+						/* This column is headed as the kernel, so it reads the kernel: the plan
+						 * value one row to the left would keep saying "yes" through a drift the
+						 * overview two lines above already reports. */
+						E('td', { 'class': 'td cbi-value-field' }, netcontrol.yesnoBadge(st.kernel_macs.indexOf(d.mac) >= 0))
 					]);
 				}, this)
 				: [netcontrol.placeholderRow(7, _('The engine has not run an event yet, so no device is restricted.'))])

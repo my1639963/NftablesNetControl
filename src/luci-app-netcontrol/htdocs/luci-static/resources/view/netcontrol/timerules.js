@@ -156,17 +156,8 @@ const AllDayTimeValue = form.Value.extend({
 
 /* The preview panel repeats the engine's own vocabulary back to the operator.
  * One small label function per cell keeps the row builder free of alternatives
- * it would otherwise have to spell out inline. */
-function sourceLabel(source) {
-	if (source === 'manual')
-		return _('manual');
-
-	if (source === 'timer')
-		return _('time rule');
-
-	return '—';
-}
-
+ * it would otherwise have to spell out inline; the source cell already has a
+ * shared spelling in netcontrol.sourceLabel(). */
 function actionLabel(action) {
 	if (action === 'block')
 		return _('Block');
@@ -435,7 +426,7 @@ return view.extend({
 			return E('tr', { 'class': 'tr cbi-section-table-row' }, [
 				E('td', { 'class': 'td cbi-value-field' }, E('code', {}, d.mac)),
 				E('td', { 'class': 'td cbi-value-field' }, netcontrol.stateSpan(d.blocked)),
-				E('td', { 'class': 'td cbi-value-field' }, sourceLabel(d.source)),
+				E('td', { 'class': 'td cbi-value-field' }, netcontrol.sourceLabel(d.source, d.owner_alive)),
 				E('td', { 'class': 'td cbi-value-field' }, d.at || '—'),
 				E('td', { 'class': 'td cbi-value-field' }, (d.rules || []).map(previewRuleNode))
 			]);

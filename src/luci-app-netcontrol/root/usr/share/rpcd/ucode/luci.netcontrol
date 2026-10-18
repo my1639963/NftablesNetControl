@@ -63,7 +63,6 @@ const MAC_OCTETS = '[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}' +
 	':[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}';
 
 const MIN_EVAL_INTERVAL = 60;
-const MAX_EVAL_INTERVAL = 600;
 const DEFAULT_EVAL_INTERVAL = 60;
 const MIN_WATCHDOG_INTERVAL = 1;
 /* crond's minute field accepts a step of 1..59 only. A step of 60 is an out of
@@ -85,6 +84,23 @@ const RESTORE_SCAN_DAYS = 31;
  * can be 59 days out (February to March), so the frame is walked a month
  * longer than that; one `date` probe per day makes the horizon cheap. */
 const NEXT_EVENT_DAYS = 70;
+
+/* Every cycle short of monthly repeats inside a week, so a frame of eight days
+ * already holds the next moment of a daily or weekly rule. Used whenever no
+ * rule asks for a monthly day, because the long frame costs one `date` fork per
+ * day and that is what makes the preview slow. */
+const SHORT_EVENT_DAYS = 8;
+
+/* The cron tick is a backstop for a dead evaluation loop, not the driver, so it
+ * is deliberately coarse: BusyBox crond logs one syslog line per job it spawns,
+ * and a per minute tick from this package used to fill a third of the visible
+ * log ring on its own. */
+const CRON_BACKSTOP_MINUTES = 5;
+
+/* The loop has to wake at least as often as the backstop that exists to cover
+ * it: let it sleep past the cron tick and cron silently becomes the driver while
+ * the pages still report the loop's own longer interval. */
+const MAX_EVAL_INTERVAL = CRON_BACKSTOP_MINUTES * 60;
 
 const uci = cursor();
 
@@ -304,22 +320,23 @@ function clock_ok() {
 	return time() >= CLOCK_BASELINE;
 }
 
+/* One `date` probe per call: nothing reads the parts, it only asks whether this
+ * clock and zone can be read at all, and status() is polled every 15 seconds, so
+ * the second probe was a fork the router paid all day for a boolean.
+ *
+ * The UTC probe is not timezone() falling through: an unsynchronised clock has no
+ * meaningful local time at all, so the parts are read in the one zone that cannot
+ * be wrong. A zone that does not resolve keeps the system local zone, which is
+ * what timezone() documents. */
 function clock_context() {
 	const tz = timezone();
 	const epoch = time();
 	let now = local_parts(tz, epoch);
-	let prev = now === null ? null : local_parts(tz, epoch - 86400);
 
-	/* The UTC pair here is not timezone() falling through: an unsynchronised
-	 * clock has no meaningful local time at all, so the parts are read in the
-	 * one zone that cannot be wrong. A zone that does not resolve keeps the
-	 * system local zone, which is what timezone() documents. */
-	if (!clock_ok() || now === null || prev === null) {
+	if (!clock_ok() || now === null)
 		now = utc_parts(epoch);
-		prev = utc_parts(epoch - 86400);
-	}
 
-	return { tz, epoch, now, prev };
+	return { tz, epoch, ok: now !== null };
 }
 
 /* ── nftables ─────────────────────────────────────────── */
@@ -328,12 +345,13 @@ function nft_available() {
 	return has(NFT_BIN, "x");
 }
 
-function table_exists() {
-	return run(`${NFT_BIN} list table ${TABLE} >/dev/null 2>&1`).rc === 0;
-}
+function kernel_presence() {
+	const res = run(`${NFT_BIN} list table ${TABLE} 2>/dev/null`);
 
-function chain_exists() {
-	return run(`${NFT_BIN} list chain ${TABLE} ${CHAIN} >/dev/null 2>&1`).rc === 0;
+	return {
+		table: res.rc === 0,
+		chain: res.rc === 0 && index(res.out, `chain ${CHAIN} {`) >= 0
+	};
 }
 
 function ensure_base() {
@@ -342,14 +360,19 @@ function ensure_base() {
 		return false;
 	}
 
-	if (!table_exists() && run(`${NFT_BIN} add table ${TABLE}`).rc !== 0) {
+	/* One probe for both objects: rebuild() reaches this on every tick, and two
+	 * separate `nft list` calls made the steady state cost more forks than the
+	 * work it was doing. */
+	const present = kernel_presence();
+
+	if (!present.table && run(`${NFT_BIN} add table ${TABLE}`).rc !== 0) {
 		log('err', 'failed to create table inet netcontrol');
 		return false;
 	}
 
 	const chain_spec = `add chain ${TABLE} ${CHAIN} '{ type filter hook forward priority -10; policy accept; }'`;
 
-	if (!chain_exists() && run(`${NFT_BIN} ${chain_spec}`).rc !== 0) {
+	if (!present.chain && run(`${NFT_BIN} ${chain_spec}`).rc !== 0) {
 		log('err', 'failed to create chain nc_forward');
 		return false;
 	}
@@ -358,28 +381,42 @@ function ensure_base() {
 }
 
 function chain_rules() {
-	const out = run(`${NFT_BIN} -a list chain ${TABLE} ${CHAIN} 2>/dev/null`).out;
+	const out = run(`${NFT_BIN} list chain ${TABLE} ${CHAIN} 2>/dev/null`).out;
 	const rules = [];
 	const pattern = `^[[:space:]]*ether (saddr|daddr) (${MAC_OCTETS})` +
-		' drop[[:space:]].*# handle ([0-9]+)';
+		' drop[[:space:]]';
 	const re = regexp(pattern);
 
-	/* Anchored to rule bodies: the chain header also carries a handle and
-	 * must never be collected for deletion. */
+	/* Anchored to rule bodies, so the chain header and its declarations never
+	 * enter the list. The comment is kept because rebuild() has to tell a
+	 * re-owned block (same address, different rule named in the comment) from a
+	 * kernel state that already matches the plan. */
 	for (let line in split(out, '\n')) {
-		const m = match(lc(line), re);
+		const body = lc(line);
+		const m = match(body, re);
 
-		if (m)
-			push(rules, { dir: m[1], mac: norm_mac(m[2]), handle: m[3] * 1 });
+		if (m === null)
+			continue;
+
+		const comment = match(body, /comment "([^"]*)"/);
+
+		push(rules, {
+			dir: m[1],
+			mac: norm_mac(m[2]),
+			comment: comment === null ? '' : comment[1]
+		});
 	}
 
 	return rules;
 }
 
-function kernel_macs() {
+/* The distinct addresses among a set of chain rules. The caller already has the
+ * rules - status() needs the rule count from the same listing - so this takes
+ * the list instead of forking `nft` again. */
+function macs_in(rules) {
 	const set = {};
 
-	for (let r in chain_rules())
+	for (let r in rules)
 		set[r.mac] = true;
 
 	return sort(keys(set));
@@ -394,17 +431,62 @@ function nft_apply(lines) {
 	return run(`printf '%s' ${shellquote(script)} | ${NFT_BIN} -f -`).rc === 0;
 }
 
+/* One blocked address is two rules - forward traffic has to go in either
+ * direction - and the comment names the row an operator can find and edit.
+ *
+ * Lowercased on purpose: chain_rules() reads the kernel listing with the whole
+ * line through lc(), so a comment that keeps any capital - a hand-named UCI
+ * section is enough - would never compare equal, and every cycle would rewrite
+ * the chain chasing a difference that does not exist. */
+function block_comment(block) {
+	return lc(safe_tag(`netcontrol:device:${block.section}:${block.rule_type}`));
+}
+
 function batch_lines(blocks) {
 	const lines = [`flush chain ${TABLE} ${CHAIN}`];
 
 	for (let b in blocks) {
-		const comment = safe_tag(`netcontrol:device:${b.section}:${b.rule_type}`);
+		const comment = block_comment(b);
 
 		push(lines, `add rule ${TABLE} ${CHAIN} ether saddr ${b.mac} drop comment "${comment}"`);
 		push(lines, `add rule ${TABLE} ${CHAIN} ether daddr ${b.mac} drop comment "${comment}"`);
 	}
 
 	return lines;
+}
+
+/* "direction mac comment" per rule, sorted, for the kernel listing and for the
+ * plan. rebuild() compares the two to decide whether a transaction is needed at
+ * all, and status() reports the same comparison as `consistent` so the page, the
+ * watchdog and the writer can never disagree about what drift is: an address-only
+ * compare would call "one of a device's two directions was deleted" consistent,
+ * and a count alone would not say which device moved. */
+function kernel_fingerprint(rules) {
+	return sort(map(rules, function (r) { return `${r.dir} ${r.mac} ${r.comment}`; }));
+}
+
+function plan_fingerprint(blocks) {
+	const out = [];
+
+	for (let b in blocks) {
+		const comment = block_comment(b);
+
+		push(out, `saddr ${b.mac} ${comment}`);
+		push(out, `daddr ${b.mac} ${comment}`);
+	}
+
+	return sort(out);
+}
+
+function same_fingerprint(actual, want) {
+	if (length(actual) !== length(want))
+		return false;
+
+	for (let i = 0; i < length(actual); i++)
+		if (actual[i] !== want[i])
+			return false;
+
+	return true;
 }
 
 /* ── engine ───────────────────────────────────────────── */
@@ -639,11 +721,19 @@ function events_in_range(rules, from, to, tz) {
  * month back because a monthly rule can equally have acted a month ago.
  *
  * Only manual_delete() calls it: the running engine never asks what a window
- * means, it is told what to do by the events themselves. */
+ * means, it is told what to do by the events themselves.
+ *
+ * The two spans are not equal, and that seam is documented rather than closed.
+ * This scans back RESTORE_SCAN_DAYS; tick() replays at most MAX_TICK_MINUTES of
+ * backlog and lets anything older go, so after an evaluation loop that has been
+ * dead for longer than a day, deleting a manual row can hand the device to a state
+ * the loop itself would never have written. The scan is the wider of the two on
+ * purpose - a deleted row has to be answered from the rules as they stand, and a
+ * monthly rule that acted three weeks ago is part of what stands. */
 function current_time_target(mac) {
 	const ctx = clock_context();
 
-	if (ctx.now === null || ctx.prev === null)
+	if (!ctx.ok)
 		return { target: 'allow', source: 'none', section: null };
 
 	const rules = filter(enabled_timerules(), function (r) {
@@ -743,22 +833,6 @@ function kernel_holds() {
 		out[r.mac] = true;
 
 	return out;
-}
-
-/* Whether the chain already holds exactly the addresses the plan wants, so a
- * convergence pass that changed nothing stays quiet. Declared before rebuild()
- * because ucode resolves a sibling only once it has been seen. */
-function same_set(actual, blocks) {
-	const want = sort(map(blocks, function (b) { return b.mac; }));
-
-	if (length(want) !== length(actual))
-		return false;
-
-	for (let i = 0; i < length(actual); i++)
-		if (actual[i] !== want[i])
-			return false;
-
-	return true;
 }
 
 /* The neighbour table answers "can this device be seen": reachability and the
@@ -1002,7 +1076,21 @@ function rebuild() {
 		return { ok: false, error: 'nftables unavailable', blocks: [] };
 
 	const wanted = plan(global_enabled(), sections('timerstate'));
-	const before = kernel_holds();
+	const current = chain_rules();
+
+	/* The loop calls this every eval_interval seconds and the cron backstop on
+	 * top of it. Rewriting a chain that already matched was the whole cost of
+	 * that: about 2700 empty transactions a day, each one a delete-and-add pair
+	 * per blocked device. An unchanged kernel state is now answered without
+	 * touching netfilter, which also means the transaction below only ever
+	 * carries a real change - so it is worth a log line every time. */
+	if (same_fingerprint(kernel_fingerprint(current), plan_fingerprint(wanted.blocks)))
+		return { ok: true, blocked: length(wanted.blocks), blocks: wanted.blocks, decisions: wanted.decisions };
+
+	const before = {};
+
+	for (let r in current)
+		before[r.mac] = true;
 
 	if (!nft_apply(batch_lines(wanted.blocks))) {
 		log('err', 'atomic rebuild failed');
@@ -1021,12 +1109,7 @@ function rebuild() {
 			clean_conntrack(b.ip ?? mac_to_ip(b.mac, arp, leases));
 	}
 
-	/* This runs every minute. Logging an unchanged convergence would bury the
-	 * two lines an operator actually has to see - a drift the watchdog had to
-	 * repair and an apply that failed - so it is written only when the set of
-	 * blocked devices really moved. */
-	if (!same_set(sort(keys(before)), wanted.blocks))
-		log('info', `reconciled: ${length(wanted.blocks)} device(s) blocked`);
+	log('info', `reconciled: ${length(wanted.blocks)} device(s) blocked`);
 
 	return { ok: true, blocked: length(wanted.blocks), blocks: wanted.blocks, decisions: wanted.decisions };
 }
@@ -1050,6 +1133,123 @@ function timed_macs() {
 		out[norm_mac(r.device_mac)] = true;
 
 	return out;
+}
+
+/* The enabled rules by the section name a state row records as its writer, holding
+ * what each one still points at and which states it could have written. `timerstate
+ * .section` says which rule last spoke for the device, so this answers the narrower
+ * question - is that rule still configured to act on this device - and deleted,
+ * disabled and re-aimed at another address all answer no. One pass over UCI and no
+ * `date`, because the status page asks it every 15 seconds.
+ *
+ * The name cannot answer it alone. `config timerule` is written anonymously into
+ * /etc/config/netcontrol, so ucode rehashes `cfgXXXXXX` from the position in the
+ * file: deleting a rule renames every rule behind it, and the survivor inherits the
+ * dead rule's name. On the name alone a delete would then read as if nothing was
+ * lost. Matching the address and the writable states narrows that to the one case
+ * where the name it inherited is also held by a rule of the same device that writes
+ * the same state - a live rule that explains the state as well as the dead one did.
+ *
+ * A rule with an end moment writes both states: the start runs its own action, the
+ * end runs the opposite one. */
+function timerule_owners() {
+	const out = {};
+
+	for (let r in enabled_timerules())
+		out[r['.name']] = {
+			mac: norm_mac(r.device_mac),
+			target: rule_target(r),
+			both: is_set(r.time_end) && r.time_end !== '',
+		};
+
+	return out;
+}
+
+/* Whether the rule that wrote a state row still governs that device. A row not
+ * written by a rule - the operator's own manual row, or the nameless open state -
+ * has no owner that could have gone missing, and neither does a row with an empty
+ * `section`, which is a hand edited or pre-recording leftover rather than a loss.
+ *
+ * This is a display fact only. Nothing is recomputed from it: a device that still
+ * has another enabled rule keeps whatever state the vanished rule left, and the
+ * engine moves it at the next moment of the surviving rules, never on the delete. */
+function owner_alive(s, mac, owners) {
+	if (`${s.source ?? 'none'}` !== 'timer')
+		return true;
+
+	const owner = `${s.section ?? ''}`;
+
+	if (owner === '')
+		return true;
+
+	const who = norm_mac(mac);
+
+	/* An address the config spells wrong has nothing to compare against, and an
+	 * unanswerable question must not be reported as a deleted rule. */
+	if (who === null)
+		return true;
+
+	const live = owners[owner];
+
+	if (live === null || live.mac !== who)
+		return false;
+
+	return live.both || live.target === (`${s.state}` === 'block' ? 'block' : 'allow');
+}
+
+/* A device whose last enabled time rule was deleted, disabled or moved to
+ * another address has no future event left to change its state, so whatever that
+ * rule last wrote would stay in the kernel forever. Those devices are handed to
+ * what is still configured: the manual row an operator left in place wins, and
+ * with nothing left to govern the device at all it falls back to open.
+ *
+ * A device that still has an enabled rule is deliberately skipped - its next
+ * moment belongs to the event stream, and a second evaluator here is how the
+ * two answers drift apart. Rows whose source is already manual are the
+ * operator's own words and stay untouched.
+ *
+ * Skipping is not forgetting. When the rule that wrote a state is gone but others
+ * are left, the state holds until a survivor speaks, and status() reports that
+ * row's owner as missing so the page can say which rule is no longer there. No
+ * landing is computed for a delete: the engine moves a device by events.
+ *
+ * Reaching for manual_row() instead of current_time_target() is what keeps this
+ * cheap enough to run on every save: no replay, no extra `date`. */
+function reconcile_ruleless_states() {
+	const index = state_index();
+	const timed = timed_macs();
+	const arp = arp_table();
+	const leases = lease_table();
+	const now = iso_now(timezone());
+	const seen = {};
+	let changed = 0;
+
+	for (let s in sections('timerstate')) {
+		const mac = norm_mac(s.mac);
+
+		if (mac === null || s.source === 'manual' || is_set(seen[mac]) || is_set(timed[mac]))
+			continue;
+
+		seen[mac] = true;
+
+		const row = manual_row(mac);
+		const section = row === null ? null : row['.name'];
+		const target = row === null ? 'allow' : (row.action === 'allow' ? 'allow' : 'block');
+		const source = row === null ? 'none' : 'manual';
+
+		if (`${s.state ?? 'allow'}` === target && `${s.source ?? 'none'}` === source)
+			continue;
+
+		if (!apply_event(index, mac, target, source, section, now, mac_to_ip(mac, arp, leases)))
+			return { changed, error: 'cannot write state row' };
+
+		changed++;
+	}
+
+	if (changed && !persist())
+		return { changed, error: 'uci commit failed' };
+
+	return { changed, error: null };
 }
 
 /* A device brought under manual control is also registered in the inventory so
@@ -1170,9 +1370,10 @@ function sync_devices() {
 	return true;
 }
 
-/* One time clean up of what the window evaluator used to need: rule_mode,
- * override and device_enabled have no meaning now that a rule carries its own
- * target and runs twice a cycle. */
+/* One time clean up of what earlier engines needed. `rule_mode`, `override` and
+ * `device_enabled` had no meaning once a rule carried its own target;
+ * `rule_type`, `source` and `enabled` on a `rule` section were write-only
+ * bookkeeping that the plan never read, so they are swept too. */
 function migrate_legacy() {
 	let dirty = false;
 
@@ -1192,11 +1393,13 @@ function migrate_legacy() {
 	}
 
 	for (let r in sections('rule')) {
-		if (uci.get(CFG, r['.name'], 'override') === null)
-			continue;
+		for (let k in ['override', 'rule_type', 'source', 'enabled']) {
+			if (uci.get(CFG, r['.name'], k) === null)
+				continue;
 
-		uci.delete(CFG, r['.name'], 'override');
-		dirty = true;
+			uci.delete(CFG, r['.name'], k);
+			dirty = true;
+		}
 	}
 
 	if (dirty && !persist())
@@ -1224,6 +1427,10 @@ function manual_set(target, action, name) {
 
 	const host = first(leases, function (l) { return l.mac === target; });
 
+	/* One timestamp per call: `date` is a fork and every field below shares it,
+	 * so the row and its event agree on a single moment. */
+	const now = iso_now(timezone());
+
 	/* Re-adding a device that already has a row keeps its label unless the
 	 * caller supplies a new one. */
 	const label = trim(`${name ?? ''}`) !== '' ? `${name}`
@@ -1232,20 +1439,17 @@ function manual_set(target, action, name) {
 	set_option(section, 'mac', target);
 	set_option(section, 'name', label);
 	set_option(section, 'ip', ip ?? 'unknown');
-	set_option(section, 'source', 'manual');
 	set_option(section, 'action', wanted);
-	set_option(section, 'rule_type', wanted === 'allow' ? 'manual_allow' : 'manual_block');
-	set_option(section, 'enabled', '1');
-	set_option(section, 'updated_at', iso_now(timezone()));
+	set_option(section, 'updated_at', now);
 
 	if (uci.get(CFG, section, 'created_at') === null)
-		set_option(section, 'created_at', iso_now(timezone()));
+		set_option(section, 'created_at', now);
 
 	ensure_device(target, label, ip);
 
 	const index = state_index();
 
-	apply_event(index, target, wanted, 'manual', section, iso_now(timezone()), ip);
+	apply_event(index, target, wanted, 'manual', section, now, ip);
 
 	if (!persist())
 		return { ok: false, error: 'uci commit failed' };
@@ -1319,21 +1523,37 @@ function watchdog_setting() {
 		DEFAULT_WATCHDOG_INTERVAL, MIN_WATCHDOG_INTERVAL, MAX_WATCHDOG_INTERVAL);
 }
 
-/* The plugin owns exactly two tagged lines: the per minute time rule tick and
- * the watchdog reconcile. They are the backstop for a dead evaluation daemon,
- * so crontab stays in sync even when the loop is not running. */
+/* The plugin owns exactly two tagged lines: the time rule backstop tick and the
+ * watchdog reconcile. The evaluation loop is the driver of time rules and runs
+ * at eval_interval; these two only matter when that loop is gone, which is why
+ * the tick here is coarse - BusyBox crond logs a syslog line for every job it
+ * spawns, and a per minute tick from this package used to be a third of the
+ * whole visible log ring. */
 function sync_cron() {
 	load_cfg();
 
 	const existing = readfile(CRON_FILE);
 	const lines = [];
 
-	if (is_set(existing))
-		for (let line in split(existing, '\n'))
-			if (line !== '' && index(line, CRON_TAG) < 0)
-				push(lines, line);
+	if (is_set(existing)) {
+		const kept = split(existing, '\n');
+		const last = length(kept) - 1;
 
-	push(lines, `* * * * * ${UBUS_TIMERULES} '{}' ${CRON_TAG}timerules`);
+		/* A trailing newline shows up as one empty element and the file is
+		 * rewritten with a single terminator; every other blank line belongs to
+		 * the user and survives. */
+		for (let i = 0; i <= last; i++) {
+			if (i === last && kept[i] === '')
+				continue;
+
+			if (index(kept[i], CRON_TAG) >= 0)
+				continue;
+
+			push(lines, kept[i]);
+		}
+	}
+
+	push(lines, `*/${CRON_BACKSTOP_MINUTES} * * * * ${UBUS_TIMERULES} '{}' ${CRON_TAG}timerules`);
 	push(lines, `*/${watchdog_setting()} * * * * ${UBUS_WATCHDOG} '{}' ${CRON_TAG}watchdog`);
 
 	const body = `${strjoin(lines, '\n')}\n`;
@@ -1446,7 +1666,6 @@ function discover() {
 	const arp = arp_table();
 	const online = online_map(arp);
 	const names = device_names();
-	const wanted = plan(global_enabled(), sections('timerstate'));
 	const neigh_re = regexp(`^([0-9.]+) dev ([^[:space:]]+).*lladdr (${MAC_OCTETS})`);
 
 	/* First row wins: the same tie break plan() and managed() use, so a hand
@@ -1488,24 +1707,19 @@ function discover() {
 
 	const devices = [];
 
+	/* Identity and reachability only: the device list page is the inventory, and
+	 * the pages that answer "is this device blocked" are the ones the engine
+	 * drives. Fields added here and read by no view are how a stale answer gets
+	 * to look official. */
 	for (let mac in order) {
 		const st = states[mac];
-		const d = wanted.decisions[mac] ?? null;
 		const lease = leases[mac]?.hostname ?? null;
-		let rule_type = null;
-
-		if (is_set(st))
-			rule_type = st.source === 'manual' ? 'manual' : 'timer';
 
 		push(devices, {
 			mac,
 			ip: leases[mac]?.ip ?? st?.ip ?? null,
 			hostname: lease,
 			online: is_set(online[mac]),
-			restricted: d?.blocked === true,
-			enabled: is_set(st),
-			rule_type,
-			section: st?.['.name'] ?? null,
 			name: names[mac] ?? lease ?? null
 		});
 	}
@@ -1545,7 +1759,7 @@ function managed() {
 		push(out, {
 			mac,
 			ip: leases[mac]?.ip ?? stored ?? mac_to_ip(mac, arp, []),
-			name: named?.name ?? names[mac] ?? lease ?? null,
+			name: names[mac] ?? named?.name ?? lease ?? null,
 			online: is_set(online[mac]),
 			blocked: is_set(held[mac]),
 			action: row.action ?? 'block',
@@ -1577,7 +1791,14 @@ function status() {
 	const states = sections('timerstate');
 	const manual_rows = group_by(sections('rule'), 'mac');
 	const wanted = plan(enabled, states);
-	const actual = kernel_macs();
+	const owners = timerule_owners();
+	/* Two forks describe the kernel here, and that is the floor: one listing
+	 * answers both "how many drop rules" and "which addresses", one table probe
+	 * answers both existence flags. The status page polls this every 15 s, so
+	 * every extra `nft` was a fork the router paid 5760 times a day. */
+	const rules = chain_rules();
+	const present = kernel_presence();
+	const actual = macs_in(rules);
 	const blocks = wanted.blocks;
 	const leases = lease_table();
 	const arp = arp_table();
@@ -1593,17 +1814,17 @@ function status() {
 		offload_detected: get_global('offload_detected', '0') === '1',
 		clock_ok: clock_ok(),
 		nft_available: nft_available(),
-		table_exists: table_exists(),
-		chain_exists: chain_exists(),
+		table_exists: present.table,
+		chain_exists: present.chain,
 		local_time: iso_now(ctx.tz),
 		utc_time: trim(run('date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null').out),
 		daemon_running: daemon_pid() !== null,
 		timerule_count: length(sections('timerule')),
 		state_count: length(states),
-		drop_rules: length(chain_rules()),
+		drop_rules: length(rules),
 		kernel_macs: actual,
 		expected_macs: sort(map(blocks, function (b) { return b.mac; })),
-		consistent: same_set(actual, blocks),
+		consistent: same_fingerprint(kernel_fingerprint(rules), plan_fingerprint(blocks)),
 		devices: map(states, function (s) {
 			const mac = norm_mac(s.mac);
 			const row = first(manual_rows[mac] ?? [], function (r) { return true; });
@@ -1611,8 +1832,13 @@ function status() {
 			return {
 				section: s['.name'],
 				mac,
-				name: row?.name ?? names[mac] ?? mac,
-				source: s.source === 'manual' ? 'manual' : 'timer',
+				name: names[mac] ?? row?.name ?? mac,
+				/* Kept as written, folds included nothing into: a device handed back to
+				 * open by reconcile_ruleless_states() carries `none`, and calling that
+				 * "time rule" here would put a rule on the screen in the same breath as
+				 * the timerule count one row above says zero. */
+				source: s.source === 'manual' ? 'manual' : (s.source === 'none' ? 'none' : 'timer'),
+				owner_alive: owner_alive(s, mac, owners),
 				state: s.state === 'block' ? 'block' : 'allow',
 				rule_section: s.section ?? null,
 				at: s.at ?? null,
@@ -1675,6 +1901,18 @@ function watchdog() {
 	if (!tz_ok)
 		log('warn', 'timezone data missing, install zoneinfo-asia');
 
+	/* The evaluation loop is what enforces time rules at eval_interval; the cron
+	 * tick is only a backstop every few minutes. A loop that died - killed
+	 * during an upgrade, or never started after a boot where the clock was still
+	 * unsynced - has to be brought back here, before the consistency short
+	 * circuit, otherwise an on-kernel-chain match would leave the timerule
+	 * enforcement sleeping on the backstop forever. start_daemon() is a no-op
+	 * while the recorded PID is alive, so this is safe to attempt every round. */
+	if (!snap.daemon_running) {
+		log('warn', 'evaluation loop not running, restarting it');
+		start_daemon();
+	}
+
 	if (!clock_ok()) {
 		log('warn', 'system clock not synchronised, skipping reconcile');
 		return { ok: true, consistent: snap.consistent, skipped: 'clock', offload: detected };
@@ -1683,8 +1921,12 @@ function watchdog() {
 	if (snap.consistent)
 		return { ok: true, consistent: true, offload: detected };
 
+	/* The rule counts are part of the line because a fingerprint can differ while
+	 * both address lists read the same: one of a device's two directions deleted,
+	 * or a block that changed owner. */
 	log('warn', `state drift detected: kernel ${strjoin(snap.kernel_macs, ' ')}` +
-		` vs plan ${strjoin(snap.expected_macs, ' ')}`);
+		` (${snap.drop_rules} rule(s)) vs plan ${strjoin(snap.expected_macs, ' ')}` +
+		` (${length(snap.expected_macs) * 2} rule(s))`);
 
 	const res = rebuild();
 
@@ -1692,6 +1934,19 @@ function watchdog() {
 }
 
 /* ── preview ──────────────────────────────────────────── */
+
+/* The day frame the preview has to walk, decided by the longest cycle in scope.
+ * Only a monthly rule can be more than a week out - day 31 to February to March
+ * is 59 days - and day_range() pays one `date` fork per day, so the wide frame
+ * is bought only when a monthly rule is actually present. */
+function preview_frame_days(rules) {
+	for (let r in rules) {
+		if ((r.cycle_type ?? 'daily') === 'monthly')
+			return NEXT_EVENT_DAYS;
+	}
+
+	return SHORT_EVENT_DAYS;
+}
 
 /* What the state machine holds for each device, and the next moment each of
  * its rules will act. Nothing here recomputes a window: the answer is the
@@ -1703,14 +1958,17 @@ function preview_snapshot(wanted) {
 	const enabled = global_enabled();
 	const states = sections('timerstate');
 	const by_state = group_by(states, 'mac');
-	const by_time = group_by(sections('timerule'), 'device_mac');
+	const timerules = sections('timerule');
+	const by_time = group_by(timerules, 'device_mac');
 	const by_rule = group_by(sections('rule'), 'mac');
 	const planned = plan(enabled, states);
+	const owners = timerule_owners();
 	const out = [];
 
 	/* One day frame for the whole reply: every rule then scans cached midnights
 	 * instead of spawning its own `date` per day. */
-	const frame = day_range(ctx.tz, ctx.epoch, ctx.epoch + NEXT_EVENT_DAYS * 86400, NEXT_EVENT_DAYS + 1);
+	const horizon = preview_frame_days(wanted === null ? timerules : (by_time[wanted] ?? []));
+	const frame = day_range(ctx.tz, ctx.epoch, ctx.epoch + horizon * 86400, horizon + 1);
 
 	for (let mac in sort(keys(merge(merge(by_state, by_time), by_rule)))) {
 		if (wanted !== null && mac !== wanted)
@@ -1739,6 +1997,7 @@ function preview_snapshot(wanted) {
 			blocked: planned.decisions[mac]?.blocked === true,
 			state: st?.state ?? 'allow',
 			source,
+			owner_alive: st === null ? true : owner_alive(st, mac, owners),
 			section: st?.section ?? null,
 			at: st?.at ?? null,
 			reason,
@@ -1806,6 +2065,14 @@ const methods = {
 
 			const cron = sync_cron();
 			const daemon = start_daemon();
+			const sync = reconcile_ruleless_states();
+
+			/* Stopping here matters as much as for the commits above: a state the
+			 * flash never got would still be converged into the kernel and reported
+			 * as saved. */
+			if (sync.error !== null)
+				return { result: { ok: false, error: sync.error, blocked: 0 } };
+
 			const res = rebuild();
 
 			return { result: { ok: res.ok && cron, cron, daemon, blocked: res.blocked, error: res.error } };
@@ -1868,14 +2135,19 @@ const methods = {
 			if (!ensure_base())
 				return { result: { ok: false, error: 'nftables unavailable' } };
 
-			/* Start the clock from now: a reboot must not replay the events of a
-			 * day the router slept through. */
-			if (read_last_tick() === null)
-				write_last_tick(time());
-
+			/* A cold start leaves /tmp behind, so the tick pointer is gone and the
+			 * first tick replays the last day - the same thing a loop that died
+			 * mid-outage gets. Seeding the pointer with the boot time instead would
+			 * strand an unblock that fell due while the router was off: the device
+			 * stays blocked until the rule fires again, which for a daily rule means
+			 * the whole next day. */
 			load_cfg();
 			migrate_legacy();
 			sync_devices();
+
+			/* Rows stranded by an older build - a rule deleted while its block was
+			 * still held - are collected here rather than waiting for a save. */
+			reconcile_ruleless_states();
 
 			const res = rebuild();
 

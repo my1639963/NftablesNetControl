@@ -52,8 +52,8 @@
  "Global switch": "全局开关",
  "HH:MM, 24 hour clock.": "HH:MM，24 小时制。",
  "Hardware flow offloading is active: established flows may keep passing after a device is blocked.": "硬件流量卸载已启用：设备被阻断后，已建立的连接可能仍然放行。",
- "How often the background loop wakes up. Rule moments are matched to the minute and cron drives that tick as well, so this only decides how soon after a minute boundary an event is applied. Range 60-600, default 60.": "后台循环多久唤醒一次。规则时刻按分钟对齐，cron 也按同一节奏触发，所以这里只决定事件在整分后多久被应用。范围 60-600，默认 60。",
- "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-30, default 3.": "看门狗比对内核规则与应有集合并修复偏差的频率。范围 1-30，默认 3。",
+ "How often the background loop wakes up. Rule moments are matched to the minute, so this only decides how soon after a minute boundary an event is applied. Cron is a backstop every 5 minutes for the case where this loop is gone, and the range stops at that backstop so the loop stays the driver. Range 60-300, default 60.": "后台循环多久唤醒一次。规则时刻按分钟对齐，所以这里只决定事件在整分后多久被应用；cron 每 5 分钟兜底一次，只在循环失联时接管；上限就停在兜底间隔，好让驱动的一直是这个循环。范围 60-300，默认 60。",
+ "How often the watchdog compares the kernel rules with the expected set, reconciles drift and restarts the evaluation loop when it is gone. Range 1-30, default 3.": "看门狗比对内核规则与应有集合并修复偏差、并在评估循环失联时重新启动它的频率。范围 1-30，默认 3。",
  "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve.": "评估所有时间规则使用的 IANA 时区名称，例如 Asia/Shanghai。需安装 zoneinfo-asia 软件包才能解析。",
  "INFO": "提示",
  "IP": "IP",
@@ -98,7 +98,7 @@
  "The device is registered in the device list as well.": "该设备同时会被登记到设备清单中。",
  "The devices NetControl keeps track of. A row here is a registration only: it writes no nftables rule, so the device keeps unrestricted access until a time rule governs it.": "NetControl 需要跟踪的设备。这里的每一行只是登记，不会生成 nftables 规则；在被时间规则纳管之前，设备的访问不受任何限制。",
  "The engine has not run an event yet, so no device is restricted.": "引擎尚未执行过任何事件，因此没有设备被限制。",
- "The evaluation loop is not running; time rules only change on cron ticks or manual reconcile.": "评估循环未运行；时间规则只在 cron 触发或手动核对时变化。",
+ "The evaluation loop is not running; the watchdog starts it again on its next round, and until then time rules change only on the backstop tick.": "评估循环未运行；看门狗会在下一轮把它重新启动，在此之前时间规则只按兜底心跳变化。",
  "The inet netcontrol table or its forward chain is missing. Reconcile to rebuild it.": "inet netcontrol 表或其 forward 链缺失。请点击“立即核对”重建。",
  "The inventory NetControl keeps track of. Listing a device here writes no kernel rule: its traffic stays unrestricted until a time rule governs it.": "NetControl 维护的设备清单。把设备列入清单不会写入任何内核规则：在被时间规则纳管之前，其流量始终不受限。",
  "The nftables utility is unavailable, so no rule can be enforced.": "nftables 工具不可用，无法执行任何规则。",
@@ -143,5 +143,6 @@
  "starts": "开始",
  "stopped": "已停止",
  "time rule": "时间规则",
+ "time rule (deleted)": "时间规则（已删除）",
  "unknown error": "未知错误"
 }

@@ -145,7 +145,10 @@ return view.extend({
 			'data-mac': d.mac,
 			'data-name': d.name || '',
 			'title': title,
-			'disabled': d.action === action ? 'disabled' : null,
+			/* Disabled against the kernel, not against the word last clicked: a timed
+			 * event may have taken the device over since, and the operator has to be
+			 * able to put it back from the row that shows the truth. */
+			'disabled': d.blocked === (action === 'block') ? 'disabled' : null,
 			'click': ui.createHandlerFn(this, function (ev) {
 				const t = ev.currentTarget;
 

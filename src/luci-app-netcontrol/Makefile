@@ -6,14 +6,14 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-netcontrol
-PKG_VERSION:=1.3.0
+PKG_VERSION:=1.3.2
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=NetControl
 
 LUCI_TITLE:=LuCI support for NetControl device internet access control
-LUCI_DESCRIPTION:=Per-device internet access control on an independent inet netcontrol nftables table: time window rules decide every evaluation cycle, manual block/restore acts at once and is taken back over by the next cycle
+LUCI_DESCRIPTION:=Per-device internet access control on an independent inet netcontrol nftables table: time window rules decide every evaluation cycle, manual block/restore acts at once and is taken back over by the next scheduled event, and a manual row rules again once the device has no time rule left
 LUCI_DEPENDS:=+luci-base +rpcd-mod-ucode +ucode-mod-fs +ucode-mod-uci +nftables +conntrack +zoneinfo-core +zoneinfo-asia
 LUCI_PKGARCH:=all
 
@@ -44,7 +44,7 @@ define Package/$(PKG_NAME)/prerm
 	/etc/init.d/netcontrol stop
 	/etc/init.d/netcontrol disable
 	# The ubus object goes away with the package; a crontab line that calls it
-	# would keep failing every minute for as long as the router runs.
+	# would keep failing on every backstop tick for as long as the router runs.
 	sed -i '/# netcontrol:/d' /etc/crontabs/root 2>/dev/null
 	/etc/init.d/cron reload 2>/dev/null
 }

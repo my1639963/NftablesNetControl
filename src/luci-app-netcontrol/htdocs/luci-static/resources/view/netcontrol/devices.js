@@ -34,6 +34,7 @@ const callCommit = rpc.declare({
 return view.extend({
 	rootNode: null,
 	map: null,
+	section: null,
 	boundPollFn: null,
 
 	load() {
@@ -76,13 +77,13 @@ return view.extend({
 		};
 
 		o = s.option(form.Value, 'eval_interval', _('Evaluation loop wake-up (seconds)'),
-			_('How often the background loop wakes up. Rule moments are matched to the minute and cron drives that tick as well, so this only decides how soon after a minute boundary an event is applied. Range 60-600, default 60.'));
-		o.datatype = 'range(60,600)';
+			_('How often the background loop wakes up. Rule moments are matched to the minute, so this only decides how soon after a minute boundary an event is applied. Cron is a backstop every 5 minutes for the case where this loop is gone, and the range stops at that backstop so the loop stays the driver. Range 60-300, default 60.'));
+		o.datatype = 'range(60,300)';
 		o.default = '60';
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'watchdog_interval', _('Watchdog interval (minutes)'),
-			_('How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-30, default 3.'));
+			_('How often the watchdog compares the kernel rules with the expected set, reconciles drift and restarts the evaluation loop when it is gone. Range 1-30, default 3.'));
 		o.datatype = 'range(1,30)';
 		o.default = '3';
 		o.rmempty = false;
@@ -130,6 +131,9 @@ return view.extend({
 		};
 
 		this.map = m;
+		this.section = s;
+
+		this.watchWrites();
 
 		/* The panel is a sibling of the map root, not a child: Map.render()
 		 * empties the map root, which would otherwise drop it on every action. */
@@ -169,7 +173,7 @@ return view.extend({
 			E('td', { 'class': 'td cbi-value-field' }, E('code', {}, d.mac)),
 			E('td', { 'class': 'td cbi-value-field' }, d.hostname || d.name || '—'),
 			E('td', { 'class': 'td cbi-value-field' }, d.ip || '—'),
-			E('td', { 'class': 'td cbi-value-field' }, d.online ? _('online') : _('offline')),
+			E('td', { 'class': 'td cbi-value-field' }, netcontrol.badge(d.online ? _('online') : _('offline'), d.online ? 'ok' : 'info')),
 			E('td', { 'class': 'td cbi-value-field' }, [
 				enrolled
 					? E('button', {
@@ -265,6 +269,30 @@ return view.extend({
 
 	/* ---- save path ---- */
 
+	/* Neither of the framework's own write paths leaves the configuration on
+	 * disk: the section modal saves through its own map instance, the row
+	 * delete and the footer save through this.map.save(), and both stop at the
+	 * rpcd delta staged for this browser session. That delta is invisible to
+	 * the pending-changes badge, so the row shows the new label while
+	 * /etc/config still holds the old one and an operator who closes the tab
+	 * loses the edit. Both instances are wrapped here - map.data is the
+	 * process wide UCI singleton, so patching its save() globally would make
+	 * every other LuCI page on the router fire a netcontrol apply too. */
+	watchWrites() {
+		const self = this;
+		const origMapSave = L.bind(this.map.save, this.map);
+		const origModalSave = L.bind(this.section.handleModalSave, this.section);
+
+		this.map.save = function() {
+			return origMapSave.apply(null, arguments)
+				.then(L.bind(self.commitAndApply, self));
+		};
+
+		this.section.handleModalSave = function(modalMap, ev) {
+			return origModalSave(modalMap, ev).then(L.bind(self.commitAndApply, self));
+		};
+	},
+
 	/* Map.save() only stages the deltas under /tmp/.uci, so commit explicitly
 	 * before the backend reloads the configuration through its own cursor. */
 	commitAndApply() {
@@ -286,12 +314,14 @@ return view.extend({
 			}, this));
 	},
 
+	/* map.save() is already wrapped by watchWrites(), so the footer buttons
+	 * reach the commit through it and must not chain a second one. */
 	handleSave(ev) {
-		return this.map.save().then(L.bind(this.commitAndApply, this));
+		return this.map.save();
 	},
 
 	handleSaveApply(ev, mode) {
-		return this.handleSave(ev);
+		return this.map.save();
 	},
 
 	injectStyles() {

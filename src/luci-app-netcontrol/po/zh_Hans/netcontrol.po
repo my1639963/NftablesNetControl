@@ -191,12 +191,14 @@ msgid "HH:MM, 24 hour clock."
 msgstr "HH:MM，24 小时制。"
 
 msgid "How often the background loop wakes up. Rule moments are matched to the "
-"minute and cron drives that tick as well, so this only decides how soon "
-"after a minute boundary an event is applied. Range 60-600, default 60."
-msgstr "后台循环多久唤醒一次。规则时刻按分钟对齐，cron 也按同一节奏触发，所以这里只决定事件在整分后多久被应用。范围 60-600，默认 60。"
+"minute, so this only decides how soon after a minute boundary an event "
+"is applied. Cron is a backstop every 5 minutes for the case where this "
+"loop is gone, and the range stops at that backstop so the loop stays the "
+"driver. Range 60-300, default 60."
+msgstr "后台循环多久唤醒一次。规则时刻按分钟对齐，所以这里只决定事件在整分后多久被应用；cron 每 5 分钟兜底一次，只在循环失联时接管；上限就停在兜底间隔，好让驱动的一直是这个循环。范围 60-300，默认 60。"
 
-msgid "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-30, default 3."
-msgstr "看门狗比对内核规则与应有集合并修复偏差的频率。范围 1-30，默认 3。"
+msgid "How often the watchdog compares the kernel rules with the expected set, reconciles drift and restarts the evaluation loop when it is gone. Range 1-30, default 3."
+msgstr "看门狗比对内核规则与应有集合并修复偏差、并在评估循环失联时重新启动它的频率。范围 1-30，默认 3。"
 
 msgid "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve."
 msgstr "评估所有时间规则使用的 IANA 时区名称，例如 Asia/Shanghai。需安装 zoneinfo-asia 软件包才能解析。"
@@ -363,8 +365,8 @@ msgstr "NetControl 需要跟踪的设备。这里的每一行只是登记，不�
 msgid "The engine has not run an event yet, so no device is restricted."
 msgstr "引擎尚未执行过任何事件，因此没有设备被限制。"
 
-msgid "The evaluation loop is not running; time rules only change on cron ticks or manual reconcile."
-msgstr "评估循环未运行；时间规则只在 cron 触发或手动核对时变化。"
+msgid "The evaluation loop is not running; the watchdog starts it again on its next round, and until then time rules change only on the backstop tick."
+msgstr "评估循环未运行；看门狗会在下一轮把它重新启动，在此之前时间规则只按兜底心跳变化。"
 
 msgid "The inet netcontrol table or its forward chain is missing. Reconcile to rebuild it."
 msgstr "inet netcontrol 表或其 forward 链缺失。请点击“立即核对”重建。"
@@ -392,6 +394,9 @@ msgstr "周四"
 
 msgid "time rule"
 msgstr "时间规则"
+
+msgid "time rule (deleted)"
+msgstr "时间规则（已删除）"
 
 msgid "Time rules"
 msgstr "时间规则"

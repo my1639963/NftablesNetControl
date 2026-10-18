@@ -55,9 +55,6 @@ return baseclass.extend({
 		document.head.appendChild(E('style', { 'id': 'netcontrol-uistyle' }, [
 			'.modal > .button-row.nc-footer { justify-content: flex-end; }',
 			'.modal > .button-row.nc-footer > button:first-of-type { margin-right: 0.5em; }',
-			'.nc-state { font-weight: bold; }',
-			'.nc-state-block { color: var(--error-color-high, #d9534f); }',
-			'.nc-state-open { color: var(--success-color-high, #5cb85c); }',
 			'.nc-badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: bold; color: #fff; }',
 			'.nc-ok { background: var(--success-color-high, #5cb85c); }',
 			'.nc-warn { background: #f0ad4e; }',
@@ -78,13 +75,43 @@ return baseclass.extend({
 		]));
 	},
 
+	/* The rounded badge the status overview uses. Every state a page reports goes
+	 * through here so a table cell and the panel above it never disagree about
+	 * what "blocked" looks like. */
+	badge(text, kind) {
+		this.injectStyles();
+
+		return E('span', { 'class': 'nc-badge nc-%s'.format(kind) }, text);
+	},
+
 	/* The one spelling of a control state, shared by the three pages that show
 	 * one: the answer first, nothing else. */
 	stateSpan(blocked) {
-		this.injectStyles();
+		return this.badge(blocked ? _('blocked') : _('open'), blocked ? 'error' : 'ok');
+	},
 
-		return E('span', { 'class': 'nc-state nc-state-%s'.format(blocked ? 'block' : 'open') },
-			blocked ? _('blocked') : _('open'));
+	/* A yes/no fact as a state: the conclusion in the same badge, grey for the
+	 * negative so a column of them stays readable. */
+	yesnoBadge(value) {
+		return this.badge(value ? _('Yes') : _('No'), value ? 'ok' : 'info');
+	},
+
+	/* Which layer last spoke for a device. A state row can also carry `none`: the
+	 * device has neither a manual row nor a time rule, so no word is the honest
+	 * answer and a bare em dash costs no translation.
+	 *
+	 * `alive` is the engine's answer to "is the rule that wrote this row still
+	 * configured for this device". When it is not, the name of a rule the operator
+	 * has already deleted would otherwise keep reading as the reason the device is
+	 * blocked - and the state does hold until a surviving rule speaks. */
+	sourceLabel(source, alive) {
+		if (source === 'manual')
+			return _('manual');
+
+		if (source === 'timer')
+			return alive === false ? _('time rule (deleted)') : _('time rule');
+
+		return '—';
 	},
 
 	/* The empty state of a hand built table, shaped like the one form.js gives a

@@ -190,11 +190,13 @@ msgid "HH:MM, 24 hour clock."
 msgstr ""
 
 msgid "How often the background loop wakes up. Rule moments are matched to the "
-"minute and cron drives that tick as well, so this only decides how soon "
-"after a minute boundary an event is applied. Range 60-600, default 60."
+"minute, so this only decides how soon after a minute boundary an event "
+"is applied. Cron is a backstop every 5 minutes for the case where this "
+"loop is gone, and the range stops at that backstop so the loop stays the "
+"driver. Range 60-300, default 60."
 msgstr ""
 
-msgid "How often the watchdog compares the kernel rules with the expected set and reconciles drift. Range 1-30, default 3."
+msgid "How often the watchdog compares the kernel rules with the expected set, reconciles drift and restarts the evaluation loop when it is gone. Range 1-30, default 3."
 msgstr ""
 
 msgid "IANA timezone name used to evaluate every time rule, e.g. Asia/Shanghai. The zoneinfo-asia package must be installed for it to resolve."
@@ -362,7 +364,7 @@ msgstr ""
 msgid "The engine has not run an event yet, so no device is restricted."
 msgstr ""
 
-msgid "The evaluation loop is not running; time rules only change on cron ticks or manual reconcile."
+msgid "The evaluation loop is not running; the watchdog starts it again on its next round, and until then time rules change only on the backstop tick."
 msgstr ""
 
 msgid "The inet netcontrol table or its forward chain is missing. Reconcile to rebuild it."
@@ -390,6 +392,9 @@ msgid "Thu"
 msgstr ""
 
 msgid "time rule"
+msgstr ""
+
+msgid "time rule (deleted)"
 msgstr ""
 
 msgid "Time rules"
