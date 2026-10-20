@@ -116,7 +116,7 @@ EOS
 	--info "arch:noarch" \
 	--info "license:Apache-2.0" \
 	--info "maintainer:NetControl" \
-	--info "url:https://github.com/my1639963/NftablesNetControl" \
+	--info "url:https://github.com/my1639963/luci-app-netcontrol" \
 	--info "description:$DESC" \
 	--info "depends:$DEPS" \
 	--script "post-install:$S/scripts/post-install" \
