@@ -1,6 +1,6 @@
 # luci-app-netcontrol
 
-## pure AI code by qoder
+## AI-generated code by Qoder
 
 Per-device internet access control for OpenWrt, exposed as a LuCI app.
 
