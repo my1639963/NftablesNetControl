@@ -1,5 +1,7 @@
 # luci-app-netcontrol
 
+## pure AI code by qoder
+
 Per-device internet access control for OpenWrt, exposed as a LuCI app.
 
 Enforcement lives in an independent `inet netcontrol` nftables table with a
@@ -65,6 +67,8 @@ into the page, while a time rule still waits for its own next event.
 
 管控落在一张独立的 `inet netcontrol` nftables 表里，链上只有 drop 规则，所以这里不会
 改动 `fw4` 的任何链；即使防火墙恢复出厂设置，也不会让被管控的设备彻底失联。
+
+## 本项目为纯AI编码，qoder实现
 
 ## 目录结构
 
